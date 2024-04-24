@@ -1451,7 +1451,7 @@ int main(int argc, char ** argv) {
     model.hparams.n_embd  = 32;
     model.hparams.n_mult  = 2;
     model.hparams.n_head  = 8;
-    model.hparams.n_layer = 1;
+    model.hparams.n_layer = 5;
     model.hparams.n_rot   = std::min(16u, model.hparams.n_embd / model.hparams.n_head);
 
     // model.hparams.n_embd  = 32;
@@ -1543,18 +1543,27 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * e = square_error_loss(ctx0, targets, logits);
 
         ggml_build_forward_expand(gf, e);
-        ggml_graph_compute_helper(work_buffer, gf, /*n_threads*/ 1);
+        ggml_graph_compute_helper(work_buffer, gf, /*n_threads*/ 12);
 
         float error_before_opt = ggml_get_f32_1d(e, 0);
 
         struct ggml_opt_params opt_params_lbfgs = ggml_opt_default_params(GGML_OPT_TYPE_LBFGS);
+//    opt->params.lbfgs.m = 25;
+ //   opt->params.lbfgs.n_iter = 100000;
+ //   opt->params.lbfgs.max_linesearch = 50;
+ //   opt->params.lbfgs.linesearch = GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
+        opt_params_lbfgs.lbfgs.m = 25;
+	opt_params_lbfgs.lbfgs.n_iter = 100000;
+	opt_params_lbfgs.lbfgs.max_linesearch = 50;
+	opt_params_lbfgs.lbfgs.linesearch = GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
+
         opt_params_lbfgs.print_forward_graph = false;
         opt_params_lbfgs.print_backward_graph = false;
-        opt_params_lbfgs.lbfgs.n_iter = 16;
+        //opt_params_lbfgs.lbfgs.n_iter = 16;
         ggml_opt(ctx0, opt_params_lbfgs, e);
         //
         ggml_build_forward_expand(gf, e);
-        ggml_graph_compute_helper(work_buffer, gf, /*n_threads*/ 1);
+        ggml_graph_compute_helper(work_buffer, gf, /*n_threads*/ 12);
 
         float error_after_opt = ggml_get_f32_1d(e, 0);
 
@@ -1608,7 +1617,7 @@ int main(int argc, char ** argv) {
             struct ggml_tensor * logits = forward(&model, &kv_self, ctx0, gf, tokens_input, sample_ctx, n_past);
 
             ggml_build_forward_expand(gf, logits);
-            ggml_graph_compute_helper(work_buffer, gf, /*n_threads*/ 1);
+            ggml_graph_compute_helper(work_buffer, gf, /*n_threads*/ 12);
 
             struct ggml_tensor * best_samples = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, sample_ctx);
             struct ggml_tensor * probs        = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_vocab, sample_ctx);

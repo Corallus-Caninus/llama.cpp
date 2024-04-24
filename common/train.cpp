@@ -1032,7 +1032,7 @@ std::string get_train_filename(const char * filename, const char * pattern_it, c
 struct train_params_common get_default_train_params_common() {
     struct train_params_common params;
     params.fn_train_data     = "shakespeare.txt";
-    params.fn_checkpoint_in  = "checkpoint.gguf";
+    params.fn_checkpoint_in  = "checkpoint-LATEST.gguf";
     params.fn_checkpoint_out = "checkpoint-ITERATION.gguf";
     params.pattern_fn_it     = "ITERATION";
     params.fn_latest         = "LATEST";

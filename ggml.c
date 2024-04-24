@@ -3688,7 +3688,8 @@ static struct ggml_tensor * ggml_add_cast_impl(
     // TODO: support less-strict constraint
     //       GGML_ASSERT(ggml_can_repeat(b, a));
     GGML_ASSERT(ggml_can_repeat_rows(b, a));
-    GGML_ASSERT(ggml_is_quantized(a->type) || a->type == GGML_TYPE_F16); // currently only supported for quantized input and f16
+    //TODO: Q8 isnt counting as quantized even when quantized using convert.py (what is their defenition/type)
+    GGML_ASSERT(ggml_is_quantized(a->type) || /*GGML_TYPE_Q8_0 || */ a->type == GGML_TYPE_F16); // currently only supported for quantized input and f16
 
     bool is_node = false;
 
@@ -19723,6 +19724,7 @@ static enum ggml_opt_result linesearch_backtracking(
         ggml_opt_callback callback,
         void * callback_data) {
     int count = 0;
+    printf("linesearch_backtracking..\n");
 
     float width  = 0.0f;
     float dg     = 0.0f;
@@ -19753,6 +19755,7 @@ static enum ggml_opt_result linesearch_backtracking(
     dgtest = params->lbfgs.ftol*dginit;
 
     while (true) {
+	    printf("iterating linesearch ");
         ggml_vec_cpy_f32(nx, x, xp);
         ggml_vec_mad_f32(nx, x, d, *step);
 
@@ -19811,15 +19814,16 @@ static enum ggml_opt_result linesearch_backtracking(
             }
         }
 
-        if (*step < params->lbfgs.min_step) {
-            return GGML_LINESEARCH_MINIMUM_STEP;
-        }
-        if (*step > params->lbfgs.max_step) {
-            return GGML_LINESEARCH_MAXIMUM_STEP;
-        }
-        if (params->lbfgs.max_linesearch <= count) {
-            return GGML_LINESEARCH_MAXIMUM_ITERATIONS;
-        }
+	//TODO: test
+        //if (*step < params->lbfgs.min_step) {
+        //    return GGML_LINESEARCH_MINIMUM_STEP;
+        //}
+        //if (*step > params->lbfgs.max_step) {
+        //    return GGML_LINESEARCH_MAXIMUM_STEP;
+        //}
+        //if (params->lbfgs.max_linesearch <= count) {
+        //    return GGML_LINESEARCH_MAXIMUM_ITERATIONS;
+        //}
 
         (*step) *= width;
     }
@@ -19844,6 +19848,7 @@ static enum ggml_opt_result ggml_opt_lbfgs(
             return GGML_OPT_RESULT_INVALID_WOLFE;
         }
     }
+	GGML_PRINT("ggml_opt_lbfgs\n");
 
     const int m = params.lbfgs.m;
 
@@ -19899,6 +19904,7 @@ static enum ggml_opt_result ggml_opt_lbfgs(
 
     bool cancel = false;
 
+    //TODO extract this to a function for this and linesearch
     // evaluate the function value and its gradient
     {
         ggml_opt_set_params(np, ps, x);
@@ -19921,6 +19927,7 @@ static enum ggml_opt_result ggml_opt_lbfgs(
             fx += ggml_get_f32_1d(f, 0);
         }
         fx *= accum_norm;
+	//TODO END OF EXTRACTION
 
         opt->loss_before = fx;
         opt->loss_after  = fx;
@@ -19983,11 +19990,16 @@ static enum ggml_opt_result ggml_opt_lbfgs(
         //       this is a simple change, but not doing this atm, since I don't have a nice
         //       way to test and don't want to break something with so many changes lined up
         ls = linesearch_backtracking(&params, nx, x, &fx, g, d, step, xp, f, gb, &cplan, np, ps, &cancel, callback, callback_data);
+	
+	//increment opt iter
+	opt->iter++;
+	printf("after opt->iter: %d\n", opt->iter);
         if (cancel) {
             return GGML_OPT_RESULT_CANCEL;
         }
 
         if (ls < 0) {
+   	    //TODO: we can try dumping the hessian and rebuilding here (like last time) but this should just be done in the calling scope as automation
             // linesearch failed - go back to the previous point and return
             ggml_vec_cpy_f32(nx, x, xp);
             ggml_vec_cpy_f32(nx, g, gp);
@@ -20038,6 +20050,7 @@ static enum ggml_opt_result ggml_opt_lbfgs(
             }
         }
 
+	//TODO: does this just stop optimizing after some iterations?
         if (params.lbfgs.n_iter != 0 && params.lbfgs.n_iter < it + 1) {
             // reached the maximum number of iterations
             return GGML_OPT_RESULT_DID_NOT_CONVERGE;
@@ -20139,7 +20152,8 @@ struct ggml_opt_params ggml_opt_default_params(enum ggml_opt_type type) {
                 result = (struct ggml_opt_params) {
                     .type       = GGML_OPT_TYPE_LBFGS,
                     .graph_size = GGML_DEFAULT_GRAPH_SIZE,
-                    .n_threads  = 1,
+		    //TODO: I dont think this is necessary. overriden in opt->params
+                    .n_threads  = 12,
                     .past       = 0,
                     .delta      = 1e-5f,
 
@@ -20155,6 +20169,7 @@ struct ggml_opt_params ggml_opt_default_params(enum ggml_opt_type type) {
                         .n_iter         = 100,
                         .max_linesearch = 20,
 
+			//5 ways to write epsilon..
                         .eps      = 1e-5f,
                         .ftol     = 1e-4f,
                         .wolfe    = 0.9f,

@@ -2094,6 +2094,7 @@ extern "C" {
         // LBFGS parameters
         struct {
             int m; // number of corrections to approximate the inv. Hessian
+	    //TODO remove all early exit conditions, this is up to max_no_improvements
             int n_iter;
             int max_linesearch;
 
