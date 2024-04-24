@@ -1902,10 +1902,6 @@ static struct trainer init_trainer_params() {
   struct train_params params;
   params.common = get_default_train_params_common();
 
-  // if (!train_params_parse(argc, argv, &params)) {
-  //     return 1;
-  // }
-
   // TODO: these should be set from whats in main, also just save latest
   params.common.fn_checkpoint_out = "checkpoint-ITERATION";
   // params.common.fn_checkpoint_in = "checkpoint-LATEST";
@@ -1974,51 +1970,16 @@ static struct trainer init_trainer_params() {
 struct trainer initialize_trainer() {
   struct trainer trainer;
 
-  //  // TODO: can this be one function? we are going to get a lot of functions
-  //  if
-  //  // we dont consolidate
-  // struct train_params params = init_trainer_params();
-  //
-  //  // if (params.common.seed == LLAMA_DEFAULT_SEED) {
-  //  //     params.common.seed = time(NULL);
-  //  // }
-  //  // printf("%s: seed: %u\n", __func__, params.common.seed);
-  //  // srand(params.common.seed);
-  //
-  //  struct llama_model_params llama_mparams = llama_model_default_params();
-  //  // the filename of the model
-  //
-  //  // TODO: @DEPRECATED
-  //  // if (!train_params_parse(argc, argv, &params)) {
-  //  //     return 1;
-  //  // }
-  //  // set the checkpoint in string
-  //  // TODO: a folder associated with the model and dataset (start of lora-db)
-  //
-  //  // TODO: extract this into llama_model_default_params-like function with
-  //  // llama_model loader
-  //  llama_mparams.n_gpu_layers = params.common.n_gpu_layers;
-  //  llama_mparams.vocab_only = false;
-  //
-  //  printf("%s: model base = '%s'\n", __func__, params.fn_model_base);
-  //  struct llama_model *lmodel =
-  //      llama_load_model_from_file(params.fn_model_base, llama_mparams);
-
-  //// llama model initialization
+  // llama model initialization
   struct llama_model_params llama_mparams = llama_model_default_params();
-  // TODO:
-  // llama_mparams.n_gpu_layers = trainer.params.common.n_gpu_layers;
   llama_mparams.vocab_only = false;
-  // struct llama_model * lmodel =
-  // llama_load_model_from_file(trainer.params.fn_model_base, llama_mparams);
-  struct llama_model *lmodel =
-      llama_load_model_from_file("finetune.gguf", llama_mparams);
 
   trainer = init_trainer_params();
+
+   struct llama_model * lmodel =
+   llama_load_model_from_file(trainer.params.fn_model_base, llama_mparams);
   trainer.lmodel = lmodel;
 
-  // trainer.lmodel = llama_load_model_from_file(trainer.params.fn_model_base,
-  // trainer.params.llama_mparams);
   //  load llama
   printf("%s: model base = '%s'\n", __func__, trainer.params.fn_model_base);
   // trainer.lmodel = llama_load_model_from_file(trainer.params.fn_model_base,
@@ -2057,8 +2018,6 @@ struct trainer initialize_trainer() {
   // legacy hyperparameters
   trainer.train->opt->params.past = trainer.params.common.opt_past;
   trainer.train->opt->params.delta = trainer.params.common.opt_delta;
-  // trainer.train->opt->params.max_no_improvement      =
-  // trainer.params.common.opt_max_no_improvement;
   trainer.train->opt->params.max_no_improvement =
       trainer.params.common.opt_max_no_improvement;
 
@@ -2116,25 +2075,6 @@ struct trainer initialize_trainer() {
 		 ggml_backend_buffer_get_size(trainer.lora.data)) /
 	     (1024.0f * 1024.0f));
 
-  // TODO extract this
-  // TODO dealloc routine
-  // if (trainer.params.only_write_lora) {
-  //     save_train_files_data save_data;
-  //     save_data.fn_checkpoint_out = "";
-  //     save_data.fn_lora_out       = trainer.params.fn_lora_out;
-  //     save_data.pattern_fn_it     = trainer.params.common.pattern_fn_it;
-  //     save_data.fn_latest         = trainer.params.common.fn_latest;
-  //     save_data.model             = &trainer.model;
-  //     save_data.lora              = &trainer.lora;
-
-  //    save_train_files(&save_data, trainer.train);
-
-  //    free_train_state(trainer.train);
-  //    ggml_free(trainer.lora.ctx);
-  //    llama_free(trainer.lctx);
-  //    llama_free_model(trainer.lmodel);
-  //    return ;
-  //}
 
   printf(
       "%s: opt_size  = %zu bytes (%.1f MB)\n", __func__,
