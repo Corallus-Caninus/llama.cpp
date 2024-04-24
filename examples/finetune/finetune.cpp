@@ -1291,19 +1291,13 @@ static int64_t get_parameter_count(struct finetune_llama_lora *lora) {
 }
 // static bool
 void load_checkpoint_lora_file(const char *filename, struct trainer *trainer) {
-  //				      struct llama_model *model,
-  //				      struct llama_lora *lora,
-  //				      struct train_state *train) {
-  // struct trainer prev_trainer = *trainer;
-  // memcpy the trainer to prev_trainer
-  struct trainer prev_trainer;
-  memcpy(&prev_trainer, trainer, sizeof(struct trainer));
-
+  struct trainer prev_trainer = *trainer;
   struct ggml_context *f_ggml_ctx;
   struct gguf_init_params params;
   params.no_alloc = false;
   params.ctx = &f_ggml_ctx;
   struct gguf_context *fctx = gguf_init_from_file(filename, params);
+
   if (fctx == NULL) {
     // lora did not load from disk, initialize
     // return false;
@@ -1313,11 +1307,15 @@ void load_checkpoint_lora_file(const char *filename, struct trainer *trainer) {
     return;
 
     // TODO: DCE
-    if (!trainer->params.only_write_lora) {
+//    if (!trainer->params.only_write_lora) {
+//      ggml_opt_init(trainer->train->opt->ctx, trainer->train->opt,
+//		    trainer->train->opt->params,
+//		    get_parameter_count(&trainer->lora));
+//    }
+//  }
       ggml_opt_init(trainer->train->opt->ctx, trainer->train->opt,
 		    trainer->train->opt->params,
 		    get_parameter_count(&trainer->lora));
-    }
   }
 
   load_checkpoint_lora_gguf(fctx, f_ggml_ctx, &trainer->model, &trainer->lora,
@@ -1325,6 +1323,7 @@ void load_checkpoint_lora_file(const char *filename, struct trainer *trainer) {
 
   gguf_free(fctx);
 
+  //TODO: I think this had a bug previously, would always shuffle dataset and retokenize unecessarily
   const bool opt_param_count_changed =
       ((trainer->lora.hparams.n_rank_attention_norm !=
 	prev_trainer.lora.hparams.n_rank_attention_norm) ||
@@ -1358,13 +1357,13 @@ void load_checkpoint_lora_file(const char *filename, struct trainer *trainer) {
 	"--checkpoint-in ''. Aborting.");
     // need to discard previous optimizer gradient statistics and opt_init
     // with new shapes
-    // TODO
   }
   if (trainer->train->opt->params.past !=
       trainer->params.common.opt_past) {  // params changed
     die("Optimizer parameter '--opt-past N' differs from checkpoint file. To "
 	"use different value finetune from scratch with empty input "
 	"checkpoint, e.g --checkpoint-in ''. Aborting");
+    // TODO
     // need to discard previous optimizer past function value statistics and
     // opt_init with new shapes
     // TODO
@@ -2002,7 +2001,6 @@ struct trainer initialize_trainer() {
 
   // defaults
   trainer.train->opt->params = ggml_opt_default_params(GGML_OPT_TYPE_LBFGS);
-  // TODO: replace this with the c versions (possibly with ifdef os)
   trainer.train->opt->params.n_threads = 12;
   trainer.params.common.n_threads = 12;
   trainer.train->opt->params.n_gradient_accumulation = 0;
@@ -2011,7 +2009,7 @@ struct trainer initialize_trainer() {
   trainer.params.common.use_checkpointing = false;
   trainer.params.common.use_flash = true;
   trainer.params.common.n_ctx = 32;
-  trainer.model.hparams.n_ctx = 32;
+  trainer.model.hparams.n_ctx = trainer.params.common.n_ctx;
   // float min_step;
   // float max_step;
 
@@ -2021,7 +2019,7 @@ struct trainer initialize_trainer() {
   trainer.train->opt->params.max_no_improvement =
       trainer.params.common.opt_max_no_improvement;
 
-  trainer.train->opt->params.lbfgs.m = 11;
+  trainer.train->opt->params.lbfgs.m = 8;
 
   trainer.train->opt->params.lbfgs.linesearch =
       GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
