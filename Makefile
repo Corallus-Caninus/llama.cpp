@@ -727,6 +727,10 @@ libllama.so: llama.o ggml.o $(OBJS)
 libllama.a: llama.o ggml.o $(OBJS) $(COMMON_DEPS)
 	ar rcs libllama.a llama.o ggml.o $(OBJS) $(COMMON_DEPS)
 
+#TODO build finetune after extracting to TLD
+libfinetune.a: finetune.cpp llama.o ggml.o $(OBJS) $(COMMON_DEPS)
+	ar rcs libfinetune.a llama.o ggml.o $(OBJS) $(COMMON_DEPS)
+
 clean:
 	rm -vrf *.o tests/*.o *.so *.a *.dll benchmark-matmult lookup-create lookup-merge lookup-stats common/build-info.cpp *.dot $(COV_TARGETS) $(BUILD_TARGETS) $(TEST_TARGETS)
 	rm -vrf ggml-cuda/*.o

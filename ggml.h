@@ -2240,6 +2240,7 @@ extern "C" {
     struct gguf_context;
 
     struct gguf_init_params {
+
         bool no_alloc;
 
         // if not NULL, create a ggml_context and allocate the tensor data in it

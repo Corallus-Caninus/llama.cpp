@@ -1448,10 +1448,10 @@ int main(int argc, char ** argv) {
     struct llama_model model;
     model.hparams.n_vocab = 8;
     model.hparams.n_ctx   = 8;
-    model.hparams.n_embd  = 32;
+    model.hparams.n_embd  = 16; // was 32
     model.hparams.n_mult  = 2;
-    model.hparams.n_head  = 8;
-    model.hparams.n_layer = 5;
+    model.hparams.n_head  = 4;// was 8
+    model.hparams.n_layer = 4;
     model.hparams.n_rot   = std::min(16u, model.hparams.n_embd / model.hparams.n_head);
 
     // model.hparams.n_embd  = 32;
@@ -1552,8 +1552,8 @@ int main(int argc, char ** argv) {
  //   opt->params.lbfgs.n_iter = 100000;
  //   opt->params.lbfgs.max_linesearch = 50;
  //   opt->params.lbfgs.linesearch = GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
-        opt_params_lbfgs.lbfgs.m = 25;
-	opt_params_lbfgs.lbfgs.n_iter = 100000;
+        opt_params_lbfgs.lbfgs.m = 3;
+	opt_params_lbfgs.lbfgs.n_iter = 50;
 	opt_params_lbfgs.lbfgs.max_linesearch = 50;
 	opt_params_lbfgs.lbfgs.linesearch = GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
 

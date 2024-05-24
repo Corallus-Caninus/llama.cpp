@@ -1,26 +1,28 @@
-#include <algorithm>
-#include <cstring>
-#include <ctime>
-#include <string>
-#include <vector>
+ #include "ggml.h"
+ #include "ggml-alloc.h"
+ #include "ggml-backend.h"
+ #include "llama.h"
+ #include "common.h"
+ #include "train.h"
+ #include <vector>
+ #include <cstring>
+ #include <ctime>
+ #include <algorithm>
+ #include <string>
 
-#include "common.h"
-#include "ggml-alloc.h"
-#include "ggml-backend.h"
-#include "ggml.h"
-#include "llama.h"
-#include "train.h"
 
-#if defined(_MSC_VER)
-#pragma warning(disable : 4244 4267)  // possible loss of data
-#endif
+
+//#define GGML_DEBUG 1
 
 // TODO: refactor this into library then, once useful, update baby-llama to
 // create custom pretrained models of llama.cpp architectures.
 // TODO: replace all printf with an idiomatic logger like GGML's
 
-// TODO: replace with something lora specific, has to be unique
-struct finetune_llama_hparams {
+#if defined(_MSC_VER)
+#pragma warning(disable : 4244 4267)  // possible loss of data
+#endif
+
+struct llama_hparams {
   uint32_t n_vocab = 32000;
   uint32_t n_ctx = 512;
   uint32_t n_embd = 4096;
@@ -41,11 +43,11 @@ struct finetune_llama_hparams {
 
   uint32_t n_embd_gqa() const { return n_embd / n_gqa(); }
 
-  bool operator!=(const finetune_llama_hparams &other) const {
+  bool operator!=(const llama_hparams &other) const {
     return memcmp(this, &other, sizeof(other));
   }
 };
-struct finetune_llama_layer {
+struct llama_layer {
   // normalization
   struct ggml_tensor *attention_norm;
 
@@ -64,18 +66,18 @@ struct finetune_llama_layer {
   struct ggml_tensor *ffn_up;	 // w3
 };
 
-struct finetune_llama_model {
-  struct finetune_llama_hparams hparams;
+struct llama_model {
+  struct llama_hparams hparams;
 
   struct ggml_tensor *tok_embeddings;
 
   struct ggml_tensor *norm;
   struct ggml_tensor *output;
 
-  std::vector<finetune_llama_layer> layers;
+  std::vector<llama_layer> layers;
 };
 
-struct finetune_llama_lora_hparams {
+struct llama_lora_hparams {
   uint32_t lora_r = 1;
   uint32_t lora_alpha = 1;
   uint32_t n_rank_attention_norm = 1;
@@ -91,11 +93,11 @@ struct finetune_llama_lora_hparams {
   uint32_t n_rank_norm = 1;
   uint32_t n_rank_output = 4;
 
-  bool operator!=(const finetune_llama_lora_hparams &other) const {
+  bool operator!=(const llama_lora_hparams &other) const {
     return memcmp(this, &other, sizeof(other));
   }
 };
-struct finetune_llama_lora_layer {
+struct llama_lora_layer {
   // normalization
   struct ggml_tensor *attention_norm_a;
   struct ggml_tensor *attention_norm_b;
@@ -122,12 +124,11 @@ struct finetune_llama_lora_layer {
   struct ggml_tensor *ffn_up_a;
   struct ggml_tensor *ffn_up_b;
 };
-
-struct finetune_llama_lora {
+struct llama_lora {
   struct ggml_context *ctx = NULL;
   ggml_backend_buffer_t data;
 
-  finetune_llama_lora_hparams hparams;
+  llama_lora_hparams hparams;
 
   struct ggml_tensor *tok_embeddings_a;
   struct ggml_tensor *tok_embeddings_b;
@@ -137,17 +138,11 @@ struct finetune_llama_lora {
   struct ggml_tensor *output_a;
   struct ggml_tensor *output_b;
 
-  std::vector<finetune_llama_lora_layer> layers;
+  std::vector<llama_lora_layer> layers;
 };
-
-// training types
-static const char *LLM_KV_OPTIMIZER_TYPE_ADAM = "adam";
-static const char *LLM_KV_OPTIMIZER_TYPE_LBFGS = "lbfgs";
 
 // TODO: can these be structured?
 //  gguf constants
-
-// gguf constants
 static const char *LLM_KV_TRAINING_TYPE_FINETUNE_LORA = "finetune_lora";
 static const char *LLM_KV_TRAINING_TYPE = "training.type";
 
@@ -175,6 +170,10 @@ static const char *LLM_KV_TRAINING_LORA_RANK_FFN_DOWN =
     "training.lora.rank.ffn_down";
 static const char *LLM_KV_TRAINING_LORA_RANK_FFN_UP =
     "training.lora.rank.ffn_up";
+
+// training types
+static const char *LLM_KV_OPTIMIZER_TYPE_ADAM = "adam";
+static const char *LLM_KV_OPTIMIZER_TYPE_LBFGS = "lbfgs";
 
 // gguf constants (sync with gguf.py)
 
@@ -208,7 +207,7 @@ static const char *LLM_TENSOR_FFN_GATE = "blk.%d.ffn_gate";
 static const char *LLM_TENSOR_FFN_DOWN = "blk.%d.ffn_down";
 static const char *LLM_TENSOR_FFN_UP = "blk.%d.ffn_up";
 
-static void print_params(struct finetune_llama_hparams *params) {
+static void print_params(struct llama_hparams *params) {
   printf("%s: n_vocab               : %u\n", __func__, params->n_vocab);
   printf("%s: n_ctx                 : %u\n", __func__, params->n_ctx);
   printf("%s: n_embd                : %u\n", __func__, params->n_embd);
@@ -221,7 +220,7 @@ static void print_params(struct finetune_llama_hparams *params) {
   printf("%s: rope_freq_scale       : %f\n", __func__, params->rope_freq_scale);
 }
 
-static void print_lora_params(struct finetune_llama_lora_hparams *params) {
+static void print_lora_params(struct llama_lora_hparams *params) {
   printf("%s: n_rank_attention_norm : %u\n", __func__,
 	 params->n_rank_attention_norm);
   printf("%s: n_rank_wq             : %u\n", __func__, params->n_rank_wq);
@@ -255,7 +254,7 @@ static void print_lora_params(struct finetune_llama_lora_hparams *params) {
   }
 
 static void load_model_hparams_gguf(struct gguf_context *ctx,
-				    struct finetune_llama_hparams *hparams,
+				    struct llama_hparams *hparams,
 				    const char *expected_arch) {
   std::string arch;
 
@@ -305,10 +304,8 @@ static void load_model_hparams_gguf(struct gguf_context *ctx,
   }
 }
 
-// push input model into finetune_llama_model
-static void init_model(struct llama_model *input,
-		       struct finetune_llama_model *model, const char *fn_model,
-		       uint32_t n_ctx) {
+static void init_llama(struct llama_model *input, struct llama_model *model,
+		       const char *fn_model, uint32_t n_ctx) {
   auto &hparams = model->hparams;
 
   std::vector<char> tn_buf;
@@ -376,7 +373,7 @@ static void init_model(struct llama_model *input,
   }
 }
 
-static void set_param_lora(struct finetune_llama_lora *lora) {
+static void set_param_lora(struct llama_lora *lora) {
   const uint32_t n_layer = lora->layers.size();
 
   struct ggml_context *ctx = lora->ctx;
@@ -412,8 +409,8 @@ static void set_param_lora(struct finetune_llama_lora *lora) {
   }
 }
 
-static void init_lora(const struct finetune_llama_model *model,
-		      struct finetune_llama_lora *lora) {
+static void init_lora(const struct llama_model *model,
+		      struct llama_lora *lora) {
   const auto &lparams = lora->hparams;
 
   const uint32_t n_embd = model->hparams.n_embd;
@@ -545,8 +542,8 @@ static void init_lora(const struct finetune_llama_model *model,
       ctx, ggml_backend_cpu_buffer_type());
 }
 
-static void randomize_lora(struct finetune_llama_lora *lora, int seed,
-			   float mean, float std, float min, float max) {
+static void randomize_lora(struct llama_lora *lora, int seed, float mean,
+			   float std, float min, float max) {
   const uint32_t n_layer = lora->layers.size();
 
   struct random_normal_distribution *rnd =
@@ -588,13 +585,12 @@ static void randomize_lora(struct finetune_llama_lora *lora, int seed,
 }
 
 static struct ggml_tensor *llama_build_lora_finetune_graphs(
-    struct finetune_llama_model *model, struct finetune_llama_lora *lora,
-    ggml_gallocr_t alloc, struct ggml_context *ctx, struct ggml_cgraph *gf,
-    struct ggml_cgraph *gb, struct ggml_cgraph *gb_tmp,
-    struct ggml_tensor **logits, struct ggml_tensor *tokens_input,
-    struct ggml_tensor *targets, const int n_tokens, const int n_batch,
-    const bool enable_flash_attn, const bool enable_checkpointing,
-    const bool measure_only) {
+    struct llama_model *model, struct llama_lora *lora, ggml_gallocr_t alloc,
+    struct ggml_context *ctx, struct ggml_cgraph *gf, struct ggml_cgraph *gb,
+    struct ggml_cgraph *gb_tmp, struct ggml_tensor **logits,
+    struct ggml_tensor *tokens_input, struct ggml_tensor *targets,
+    const int n_tokens, const int n_batch, const bool enable_flash_attn,
+    const bool enable_checkpointing, const bool measure_only) {
   ggml_set_scratch(ctx, {
 			    0,
 			    0,
@@ -693,8 +689,8 @@ static struct ggml_tensor *llama_build_lora_finetune_graphs(
   const float kv_scale = 1.0f / sqrtf(float(n_embd) / n_head);
 
   for (int il = 0; il < n_layer; ++il) {
-    struct finetune_llama_layer &layer = model->layers[il];
-    struct finetune_llama_lora_layer &llayer = lora->layers[il];
+    struct llama_layer &layer = model->layers[il];
+    struct llama_lora_layer &llayer = lora->layers[il];
 
     struct ggml_tensor *attention_norm = add_to_f32(
 	ctx, layer.attention_norm,
@@ -910,7 +906,7 @@ static struct ggml_tensor *llama_build_lora_finetune_graphs(
   ggml_build_forward_expand(gb, ggml_scale_inplace(ctx, model->norm, 1.0f));
   ggml_build_forward_expand(gb, ggml_scale_inplace(ctx, model->output, 1.0f));
   for (int il = 0; il < n_layer; ++il) {
-    struct finetune_llama_layer &layer = model->layers[il];
+    struct llama_layer &layer = model->layers[il];
     ggml_build_forward_expand(
 	gb, ggml_scale_inplace(ctx, layer.attention_norm, 1.0f));
     ggml_build_forward_expand(gb,
@@ -964,8 +960,8 @@ static struct ggml_tensor *llama_build_lora_finetune_graphs(
 
 static void load_llama_lora_gguf(struct gguf_context *fctx,
 				 struct ggml_context *f_ggml_ctx,
-				 struct finetune_llama_model *model,
-				 struct finetune_llama_lora *lora) {
+				 struct llama_model *model,
+				 struct llama_lora *lora) {
   // NOTE: gguf_context must be initialized with f_ggml_ctx and no_alloc=false,
   // otherwise tensor data can not be read
 
@@ -983,7 +979,7 @@ static void load_llama_lora_gguf(struct gguf_context *fctx,
 	       LLM_KV_GENERAL_FILE_TYPE);
   GGML_ASSERT((enum llama_ftype)ftype_u == LLAMA_FTYPE_ALL_F32);
 
-  struct finetune_llama_hparams hparams;
+  struct llama_hparams hparams;
   load_model_hparams_gguf(fctx, &hparams, arch.c_str());
 
   // parameters that define tensor shapes must match
@@ -1065,8 +1061,8 @@ static void load_llama_lora_gguf(struct gguf_context *fctx,
 }
 
 static void save_llama_lora_gguf(struct gguf_context *fctx,
-				 struct finetune_llama_model *model,
-				 struct finetune_llama_lora *lora) {
+				 struct llama_model *model,
+				 struct llama_lora *lora) {
   const char *arch = "llama";
   enum llama_ftype ftype = LLAMA_FTYPE_ALL_F32;
 
@@ -1155,8 +1151,8 @@ static void save_llama_lora_gguf(struct gguf_context *fctx,
 
 static void load_checkpoint_lora_gguf(struct gguf_context *fctx,
 				      struct ggml_context *f_ggml_ctx,
-				      struct finetune_llama_model *model,
-				      struct finetune_llama_lora *lora,
+				      struct llama_model *model,
+				      struct llama_lora *lora,
 				      struct train_state *train) {
   std::string train_type = LLM_KV_TRAINING_TYPE_FINETUNE_LORA;
   GGUF_GET_KEY(fctx, train_type, gguf_get_val_str, GGUF_TYPE_STRING, false,
@@ -1168,8 +1164,8 @@ static void load_checkpoint_lora_gguf(struct gguf_context *fctx,
 }
 
 static void save_checkpoint_lora_gguf(struct gguf_context *fctx,
-				      struct finetune_llama_model *model,
-				      struct finetune_llama_lora *lora,
+				      struct llama_model *model,
+				      struct llama_lora *lora,
 				      struct train_state *train) {
   gguf_set_val_str(fctx, LLM_KV_TRAINING_TYPE,
 		   LLM_KV_TRAINING_TYPE_FINETUNE_LORA);
@@ -1237,7 +1233,6 @@ struct train_params {
 struct trainer {
   // local hyperparameters
   struct train_params params;
-  struct train_state *train;
 
   // TODO: move this to state struct--should state all go here?
   int n_tokens;
@@ -1248,17 +1243,18 @@ struct trainer {
   ggml_cgraph *gf;
 
   // local lora implementation
-  struct finetune_llama_model model;
-  struct finetune_llama_lora lora;
+  struct llama_model model;//TODO remove this? can point to this
+  struct llama_lora lora;
 
   // llama integration
+  struct train_state *train;
   struct llama_model *lmodel;
   struct llama_context *lctx;
 
   // TODO: some kind of automated database feature that stores checkpoints and
   // loads latest automatically given a dataset-model pair
 };
-static int64_t get_parameter_count(struct finetune_llama_lora *lora) {
+static int64_t get_parameter_count(struct llama_lora *lora) {
   int64_t nx = 0;
   nx += ggml_nelements(lora->tok_embeddings_a);
   nx += ggml_nelements(lora->tok_embeddings_b);
@@ -1290,96 +1286,82 @@ static int64_t get_parameter_count(struct finetune_llama_lora *lora) {
   }
   return nx;
 }
-// static bool
-void load_checkpoint_lora_file(const char *filename, struct trainer *trainer) {
-  struct trainer prev_trainer = *trainer;
+//static bool 
+void load_checkpoint_lora_file(const char *filename,
+		struct trainer *trainer){
+//				      struct llama_model *model,
+//				      struct llama_lora *lora,
+//				      struct train_state *train) {
+	//struct trainer prev_trainer = *trainer;
+	//memcpy the trainer to prev_trainer
+	struct trainer prev_trainer;
+	memcpy(&prev_trainer, trainer, sizeof(struct trainer));
+
   struct ggml_context *f_ggml_ctx;
   struct gguf_init_params params;
   params.no_alloc = false;
   params.ctx = &f_ggml_ctx;
   struct gguf_context *fctx = gguf_init_from_file(filename, params);
-
   if (fctx == NULL) {
-    // lora did not load from disk, initialize
-    // return false;
+		//lora did not load from disk, initialize
+    //return false;
     init_lora(&trainer->model, &trainer->lora);
-    randomize_lora(&trainer->lora, trainer->params.common.seed, 0.0f, 1.0f,
-		   -1.0f, +1.0f);
-    return;
-
-    // TODO: DCE
-//    if (!trainer->params.only_write_lora) {
-//      ggml_opt_init(trainer->train->opt->ctx, trainer->train->opt,
-//		    trainer->train->opt->params,
-//		    get_parameter_count(&trainer->lora));
-//    }
-//  }
+    randomize_lora(&trainer->lora, trainer->params.common.seed, 0.0f, 1.0f, -1.0f,
+		   +1.0f);
+    if (!trainer->params.only_write_lora) {
       ggml_opt_init(trainer->train->opt->ctx, trainer->train->opt,
 		    trainer->train->opt->params,
 		    get_parameter_count(&trainer->lora));
+		}
   }
 
-  load_checkpoint_lora_gguf(fctx, f_ggml_ctx, &trainer->model, &trainer->lora,
-			    trainer->train);
+  load_checkpoint_lora_gguf(fctx, f_ggml_ctx, &trainer->model, &trainer->lora, trainer->train);
 
   gguf_free(fctx);
 
-  //TODO: I think this had a bug previously, would always shuffle dataset and retokenize unecessarily
-  const bool opt_param_count_changed =
-      ((trainer->lora.hparams.n_rank_attention_norm !=
-	prev_trainer.lora.hparams.n_rank_attention_norm) ||
-       (trainer->lora.hparams.n_rank_wq !=
-	prev_trainer.lora.hparams.n_rank_wq) ||
-       (trainer->lora.hparams.n_rank_wk !=
-	prev_trainer.lora.hparams.n_rank_wk) ||
-       (trainer->lora.hparams.n_rank_wv !=
-	prev_trainer.lora.hparams.n_rank_wv) ||
-       (trainer->lora.hparams.n_rank_wo !=
-	prev_trainer.lora.hparams.n_rank_wo) ||
-       (trainer->lora.hparams.n_rank_ffn_norm !=
-	prev_trainer.lora.hparams.n_rank_ffn_norm) ||
-       (trainer->lora.hparams.n_rank_ffn_gate !=
-	prev_trainer.lora.hparams.n_rank_ffn_gate) ||
-       (trainer->lora.hparams.n_rank_ffn_down !=
-	prev_trainer.lora.hparams.n_rank_ffn_down) ||
-       (trainer->lora.hparams.n_rank_ffn_up !=
-	prev_trainer.lora.hparams.n_rank_ffn_up) ||
-       (trainer->lora.hparams.n_rank_tok_embeddings !=
-	prev_trainer.lora.hparams.n_rank_tok_embeddings) ||
-       (trainer->lora.hparams.n_rank_norm !=
-	prev_trainer.lora.hparams.n_rank_norm) ||
-       (trainer->lora.hparams.n_rank_output !=
-	prev_trainer.lora.hparams.n_rank_output));
+    const bool opt_param_count_changed =
+	((trainer->lora.hparams.n_rank_attention_norm !=
+	  prev_trainer.lora.hparams.n_rank_attention_norm) ||
+	 (trainer->lora.hparams.n_rank_wq != prev_trainer.lora.hparams.n_rank_wq) ||
+	 (trainer->lora.hparams.n_rank_wk != prev_trainer.lora.hparams.n_rank_wk) ||
+	 (trainer->lora.hparams.n_rank_wv != prev_trainer.lora.hparams.n_rank_wv) ||
+	 (trainer->lora.hparams.n_rank_wo != prev_trainer.lora.hparams.n_rank_wo) ||
+	 (trainer->lora.hparams.n_rank_ffn_norm != prev_trainer.lora.hparams.n_rank_ffn_norm) ||
+	 (trainer->lora.hparams.n_rank_ffn_gate != prev_trainer.lora.hparams.n_rank_ffn_gate) ||
+	 (trainer->lora.hparams.n_rank_ffn_down != prev_trainer.lora.hparams.n_rank_ffn_down) ||
+	 (trainer->lora.hparams.n_rank_ffn_up != prev_trainer.lora.hparams.n_rank_ffn_up) ||
+	 (trainer->lora.hparams.n_rank_tok_embeddings !=
+	  prev_trainer.lora.hparams.n_rank_tok_embeddings) ||
+	 (trainer->lora.hparams.n_rank_norm != prev_trainer.lora.hparams.n_rank_norm) ||
+	 (trainer->lora.hparams.n_rank_output != prev_trainer.lora.hparams.n_rank_output));
 
-  if (opt_param_count_changed) {
-    print_lora_params(&trainer->lora.hparams);
-    die("Provided rank differs from checkpoint file. To use different rank "
-	"start finetune from scratch with empty input checkpoint, e.g "
-	"--checkpoint-in ''. Aborting.");
-    // need to discard previous optimizer gradient statistics and opt_init
-    // with new shapes
-  }
-  if (trainer->train->opt->params.past !=
-      trainer->params.common.opt_past) {  // params changed
-    die("Optimizer parameter '--opt-past N' differs from checkpoint file. To "
-	"use different value finetune from scratch with empty input "
-	"checkpoint, e.g --checkpoint-in ''. Aborting");
-    // TODO
-    // need to discard previous optimizer past function value statistics and
-    // opt_init with new shapes
-    // TODO
-  }
+    if (opt_param_count_changed) {
+      print_lora_params(&trainer->lora.hparams);
+      die("Provided rank differs from checkpoint file. To use different rank "
+	  "start finetune from scratch with empty input checkpoint, e.g "
+	  "--checkpoint-in ''. Aborting.");
+      // need to discard previous optimizer gradient statistics and opt_init
+      // with new shapes
+      // TODO
+    }
+    if (trainer->train->opt->params.past != trainer->params.common.opt_past) {  // params changed
+      die("Optimizer parameter '--opt-past N' differs from checkpoint file. To "
+	  "use different value finetune from scratch with empty input "
+	  "checkpoint, e.g --checkpoint-in ''. Aborting");
+      // need to discard previous optimizer past function value statistics and
+      // opt_init with new shapes
+      // TODO
+    }
   //} else {
   //  }
   //}
-//TODO: do we need to do this?
   trainer->train->opt->iter = trainer->train->train_its;
-  // return true;
+  //return true;
 }
 
 static void save_checkpoint_lora_file(const char *filename,
-				      struct finetune_llama_model *model,
-				      struct finetune_llama_lora *lora,
+				      struct llama_model *model,
+				      struct llama_lora *lora,
 				      struct train_state *train) {
   printf("%s: saving to %s\n", __func__, filename);
   struct gguf_context *fctx = gguf_init_empty();
@@ -1498,8 +1480,7 @@ static void write_tensor(struct llama_file *file, struct ggml_tensor *tensor,
   file->write_raw(tensor->data, ggml_nbytes(tensor));
 }
 
-static void save_as_llama_lora(const char *filename,
-			       struct finetune_llama_lora *lora) {
+static void save_as_llama_lora(const char *filename, struct llama_lora *lora) {
   printf("%s: saving to %s\n", __func__, filename);
   struct llama_file file(filename, "wb");
   if (file.fp == NULL) {
@@ -1575,8 +1556,82 @@ static void save_as_llama_lora(const char *filename,
 }
 
 // initialize all the user specified configuration for LoRA trainning.
+static struct trainer init_config() {
+  struct trainer trainer;
+  struct train_params params;
+  // TODO: just create a default for train_params, maybe as a config.c file or organize this to have a block of declarations.
+  params.common = get_default_train_params_common();
 
-//TODO: stash this in a git patch or something we arent going back to cli bash stuff in this
+ //if (!train_params_parse(argc, argv, &params)) {
+ //    return 1;
+ //}
+
+  // TODO: these should be set from whats in main, also just save latest
+  params.common.fn_checkpoint_out = "checkpoint-ITERATION";
+  //params.common.fn_checkpoint_in = "checkpoint-LATEST";
+  params.fn_lora_out = "ggml-lora-ITERATION.gguf";  // gguf?
+  params.fn_model_base = "finetune.gguf";
+  params.common.fn_train_data = "what_is_lora.txt";
+  params.common.n_gpu_layers = 0;
+  params.common.save_every = 1;
+
+  // TODO: @DEPRECATED
+  // params.fn_model_base     = "";
+  // params.fn_lora_out       = "ggml-lora-ITERATION-f32.gguf";
+
+  params.only_write_lora = false;
+
+  params.f_norm_rms_eps = 1e-5f;
+  params.rope_freq_base = 10000.0f;
+  params.rope_freq_scale = 1.0f;
+
+  params.custom_f_norm_rms_eps = false;
+  params.custom_rope_freq_base = false;
+  params.custom_rope_freq_scale = false;
+
+  params.lora_r = 11;
+  params.lora_alpha = 4;
+  params.custom_lora_alpha = false;
+
+  params.n_rank_attention_norm = 1;
+  params.n_rank_wq = 4;
+  params.n_rank_wk = 4;
+  params.n_rank_wv = 4;
+  params.n_rank_wo = 4;
+  params.n_rank_ffn_norm = 1;
+  params.n_rank_ffn_gate = 4;
+  params.n_rank_ffn_down = 4;
+  params.n_rank_ffn_up = 4;
+  params.n_rank_tok_embeddings = 4;
+  params.n_rank_norm = 1;
+  params.n_rank_output = 4;
+
+  params.custom_n_rank_attention_norm = false;
+  params.custom_n_rank_wq = false;
+  params.custom_n_rank_wk = false;
+  params.custom_n_rank_wv = false;
+  params.custom_n_rank_wo = false;
+  params.custom_n_rank_ffn_norm = false;
+  params.custom_n_rank_ffn_gate = false;
+  params.custom_n_rank_ffn_down = false;
+  params.custom_n_rank_ffn_up = false;
+  params.custom_n_rank_tok_embeddings = false;
+  params.custom_n_rank_norm = false;
+  params.custom_n_rank_output = false;
+
+  params.fn_model_base = "finetune.gguf";
+  finish_processing_train_args(&params.common);
+ if (params.common.seed == LLAMA_DEFAULT_SEED) {
+     params.common.seed = time(NULL);
+ }
+ printf("%s: seed: %u\n", __func__, params.common.seed);
+ srand(params.common.seed);
+  trainer.params = params;
+
+
+  return trainer;
+}
+
 // TODO: use this to setup and expose default configuration.
 // static void train_print_usage(int argc, char ** argv, const struct
 // train_params * params) {
@@ -1628,7 +1683,7 @@ static void save_as_llama_lora(const char *filename,
 // params) {
 //     bool invalid_param = false;
 //     std::string arg;
-//     struct train_params default_params = init_trainer_params();
+//     struct train_params default_params = init_config();
 //     const std::string arg_prefix = "--";
 //
 //     for (int i = 1; i < argc; i++) {
@@ -1797,8 +1852,8 @@ struct save_train_files_data {
   const char *fn_lora_out;
   const char *pattern_fn_it;
   const char *fn_latest;
-  struct finetune_llama_model *model;
-  struct finetune_llama_lora *lora;
+  struct llama_model *model;
+  struct llama_lora *lora;
 };
 
 static void save_train_files(void *vdata, struct train_state *train) {
@@ -1834,8 +1889,9 @@ static void save_train_files(void *vdata, struct train_state *train) {
   }
 }
 
-void initialize_lora_hparams(struct trainer *trainer) {
-  // TODO: extract this to a function for struct lora
+
+void initialize_lora_hparams(struct trainer * trainer){
+	//TODO: extract this to a function for struct lora 
   if (trainer->params.custom_f_norm_rms_eps) {
     trainer->model.hparams.f_norm_rms_eps = trainer->params.f_norm_rms_eps;
   }
@@ -1847,8 +1903,8 @@ void initialize_lora_hparams(struct trainer *trainer) {
   }
   trainer->lora.hparams.lora_r = trainer->params.lora_r;
   trainer->lora.hparams.lora_alpha = trainer->params.custom_lora_alpha
-					 ? trainer->params.lora_alpha
-					 : trainer->params.lora_r;
+					? trainer->params.lora_alpha
+					: trainer->params.lora_r;
   uint32_t n_rank_attention_norm = trainer->params.custom_n_rank_attention_norm
 				       ? trainer->params.n_rank_attention_norm
 				       : 1;
@@ -1897,99 +1953,58 @@ void initialize_lora_hparams(struct trainer *trainer) {
   trainer->lora.hparams.n_rank_norm = n_rank_norm;
   trainer->lora.hparams.n_rank_output = n_rank_output;
 }
-
-static struct trainer init_trainer_params() {
-  struct trainer trainer;
-  struct train_params params;
-  params.common = get_default_train_params_common();
-
-  // TODO: these should be set from whats in main, also just save latest
-  params.common.fn_checkpoint_out = "checkpoint-ITERATION";
-  // params.common.fn_checkpoint_in = "checkpoint-LATEST";
-  params.common.fn_checkpoint_in = "";
-  params.fn_lora_out = "ggml-lora-ITERATION.gguf";  // gguf?
-  params.fn_model_base = "finetune.gguf";
-  params.common.fn_train_data = "what_is_lora.txt";
-  params.common.n_gpu_layers = 0;
-  params.common.save_every = 1;
-
-  // TODO: @DEPRECATED
-  // params.fn_model_base     = "";
-  // params.fn_lora_out       = "ggml-lora-ITERATION-f32.gguf";
-
-  params.only_write_lora = false;
-
-  params.f_norm_rms_eps = 1e-5f;
-  params.rope_freq_base = 10000.0f;
-  params.rope_freq_scale = 1.0f;
-
-  params.custom_f_norm_rms_eps = false;
-  params.custom_rope_freq_base = false;
-  params.custom_rope_freq_scale = false;
-
-  params.lora_r = 11;
-  params.lora_alpha = 4;
-  params.custom_lora_alpha = false;
-
-  params.n_rank_attention_norm = 1;
-  params.n_rank_wq = 4;
-  params.n_rank_wk = 4;
-  params.n_rank_wv = 4;
-  params.n_rank_wo = 4;
-  params.n_rank_ffn_norm = 1;
-  params.n_rank_ffn_gate = 4;
-  params.n_rank_ffn_down = 4;
-  params.n_rank_ffn_up = 4;
-  params.n_rank_tok_embeddings = 4;
-  params.n_rank_norm = 1;
-  params.n_rank_output = 4;
-
-  params.custom_n_rank_attention_norm = false;
-  params.custom_n_rank_wq = false;
-  params.custom_n_rank_wk = false;
-  params.custom_n_rank_wv = false;
-  params.custom_n_rank_wo = false;
-  params.custom_n_rank_ffn_norm = false;
-  params.custom_n_rank_ffn_gate = false;
-  params.custom_n_rank_ffn_down = false;
-  params.custom_n_rank_ffn_up = false;
-  params.custom_n_rank_tok_embeddings = false;
-  params.custom_n_rank_norm = false;
-  params.custom_n_rank_output = false;
-
-  params.fn_model_base = "finetune.gguf";
-  finish_processing_train_args(&params.common);
-  if (params.common.seed == LLAMA_DEFAULT_SEED) {
-    params.common.seed = time(NULL);
-  }
-  printf("%s: seed: %u\n", __func__, params.common.seed);
-  srand(params.common.seed);
-  trainer.params = params;
-
-  return trainer;
-}
 struct trainer initialize_trainer() {
-//TODO: lbfgs needs gradient smoothing (accumulation) or another form of epochs. Otherwise it is intuitive it will overfit to the first backprop.
   struct trainer trainer;
 
-  // llama model initialization
+//  // TODO: can this be one function? we are going to get a lot of functions if
+//  // we dont consolidate
+  //struct train_params params = init_config();
+//
+//  // if (params.common.seed == LLAMA_DEFAULT_SEED) {
+//  //     params.common.seed = time(NULL);
+//  // }
+//  // printf("%s: seed: %u\n", __func__, params.common.seed);
+//  // srand(params.common.seed);
+//
+//  struct llama_model_params llama_mparams = llama_model_default_params();
+//  // the filename of the model
+//
+//  // TODO: @DEPRECATED
+//  // if (!train_params_parse(argc, argv, &params)) {
+//  //     return 1;
+//  // }
+//  // set the checkpoint in string
+//  // TODO: a folder associated with the model and dataset (start of lora-db)
+//
+//  // TODO: extract this into llama_model_default_params-like function with
+//  // llama_model loader
+//  llama_mparams.n_gpu_layers = params.common.n_gpu_layers;
+//  llama_mparams.vocab_only = false;
+//
+//  printf("%s: model base = '%s'\n", __func__, params.fn_model_base);
+//  struct llama_model *lmodel =
+//      llama_load_model_from_file(params.fn_model_base, llama_mparams);
+  
+  //trainer = init_config();
+  //// llama model initialization
   struct llama_model_params llama_mparams = llama_model_default_params();
+  //llama_mparams.n_gpu_layers = trainer.params.common.n_gpu_layers;
   llama_mparams.vocab_only = false;
+  //struct llama_model * lmodel = llama_load_model_from_file(trainer.params.fn_model_base, llama_mparams);
+  struct llama_model * lmodel = llama_load_model_from_file("finetune.gguf", llama_mparams);
 
-  trainer = init_trainer_params();
-
-   struct llama_model * lmodel =
-   llama_load_model_from_file(trainer.params.fn_model_base, llama_mparams);
+  trainer = init_config();
   trainer.lmodel = lmodel;
 
-  //  load llama
+  //trainer.lmodel = llama_load_model_from_file(trainer.params.fn_model_base, trainer.params.llama_mparams);
+  // load llama
   printf("%s: model base = '%s'\n", __func__, trainer.params.fn_model_base);
-  // trainer.lmodel = llama_load_model_from_file(trainer.params.fn_model_base,
-  // &trainer.params.llama_mparams);
+  //trainer.lmodel = llama_load_model_from_file(trainer.params.fn_model_base, &trainer.params.llama_mparams);
   struct llama_context_params llama_cparams = llama_context_default_params();
-  trainer.lctx = llama_new_context_with_model(trainer.lmodel, llama_cparams);
+  llama_new_context_with_model(trainer.lmodel, llama_cparams);
 
-  init_model(trainer.lmodel, &trainer.model, trainer.params.fn_model_base,
+  printf("debug here \n");
+  init_llama(trainer.lmodel, &trainer.model, trainer.params.fn_model_base,
 	     trainer.params.common.n_ctx);
 
   trainer.train = init_train_state();
@@ -2001,55 +2016,59 @@ struct trainer initialize_trainer() {
 
   trainer.train->opt->params.graph_size = LLAMA_TRAIN_MAX_NODES;
 
+  // TODO: extract this and default_train_params to a config struct with
   // defaults
   trainer.train->opt->params = ggml_opt_default_params(GGML_OPT_TYPE_LBFGS);
+  // TODO: replace this with the c versions (possibly with ifdef os)
   trainer.train->opt->params.n_threads = 12;
-  trainer.params.common.n_threads = 12;
   trainer.train->opt->params.n_gradient_accumulation = 0;
-  trainer.train->train_epochs = -1;
+  trainer.train->train_epochs = 1;
   trainer.params.common.n_batch = 1;
   trainer.params.common.use_checkpointing = false;
   trainer.params.common.use_flash = true;
-  trainer.params.common.n_ctx = 32;
-  trainer.model.hparams.n_ctx = trainer.params.common.n_ctx;
+  trainer.params.common.n_ctx = 64;
+  trainer.model.hparams.n_ctx = 64;
   // float min_step;
   // float max_step;
 
   // legacy hyperparameters
   trainer.train->opt->params.past = trainer.params.common.opt_past;
   trainer.train->opt->params.delta = trainer.params.common.opt_delta;
+  // trainer.train->opt->params.max_no_improvement      =
+  // trainer.params.common.opt_max_no_improvement;
   trainer.train->opt->params.max_no_improvement =
       trainer.params.common.opt_max_no_improvement;
 
-  trainer.train->opt->params.lbfgs.m = 8;
-  trainer.train->opt->params.lbfgs.n_iter = 1;
-  // trainer.train->opt->params.lbfgs.max_linesearch = 5000000;
+  trainer.train->opt->params.lbfgs.m = 250;
 
   trainer.train->opt->params.lbfgs.linesearch =
       GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
 
+  // TODO: optimizer shouldnt ever quit, its got enough work to do and inherent
+  // complexity, this is a trainer feature.
+  // trainer.train->opt->params.lbfgs.n_iter = 100000;//TODO set to inf, this is
+  // already limited in trainer
+  // TODO remove this completely it just crashes the opt. trying to restore the
+  // trainning with the
+  //  hessian produces getting restuck deterministicly. KISS with the trainer
+  //  limiting the iterations and improvement termination
+  // trainer.train->opt->params.lbfgs.max_linesearch = 5000000;
+
   printf("%s: init model\n", __func__);
 
-  // if (load_checkpoint_lora_file(trainer.params.common.fn_checkpoint_in,
-  //&trainer.model, &trainer.lora, trainer.train)) {
-  // if (
-  printf("before checkpoint");
-  // TODO: implement
-  init_lora(&trainer.model, &trainer.lora);
-  randomize_lora(&trainer.lora, trainer.params.common.seed, 0.0f, 1.0f, -1.0f,
-		 +1.0f);
-  ggml_opt_init(trainer.train->opt->ctx, trainer.train->opt,
-		trainer.train->opt->params, get_parameter_count(&trainer.lora));
-  // load_checkpoint_lora_file(trainer.params.common.fn_checkpoint_in,
-  //&trainer) ;
-  printf("after checkpoint");
-  //{
-  // overwrite last n_ctx with user provided n_ctx
-  // if (params.common.custom_n_ctx) {
-  //    model.hparams.n_ctx = params.common.n_ctx;
-  //}
+  //if (load_checkpoint_lora_file(trainer.params.common.fn_checkpoint_in,
+				//&trainer.model, &trainer.lora, trainer.train)) {
+		//if (
+				load_checkpoint_lora_file(trainer.params.common.fn_checkpoint_in,
+					&trainer) ;
+				//{
+    // overwrite last n_ctx with user provided n_ctx
+    // if (params.common.custom_n_ctx) {
+    //    model.hparams.n_ctx = params.common.n_ctx;
+    //}
 
-  // TODO: this should be fine?
+
+				//TODO: this should be fine?
   print_params(&trainer.model.hparams);
   print_lora_params(&trainer.lora.hparams);
   printf("%s: total train_iterations %llu\n", __func__,
@@ -2067,6 +2086,25 @@ struct trainer initialize_trainer() {
 		 ggml_backend_buffer_get_size(trainer.lora.data)) /
 	     (1024.0f * 1024.0f));
 
+  // TODO extract this
+  // TODO dealloc routine
+  // if (trainer.params.only_write_lora) {
+  //     save_train_files_data save_data;
+  //     save_data.fn_checkpoint_out = "";
+  //     save_data.fn_lora_out       = trainer.params.fn_lora_out;
+  //     save_data.pattern_fn_it     = trainer.params.common.pattern_fn_it;
+  //     save_data.fn_latest         = trainer.params.common.fn_latest;
+  //     save_data.model             = &trainer.model;
+  //     save_data.lora              = &trainer.lora;
+
+  //    save_train_files(&save_data, trainer.train);
+
+  //    free_train_state(trainer.train);
+  //    ggml_free(trainer.lora.ctx);
+  //    llama_free(trainer.lctx);
+  //    llama_free_model(trainer.lmodel);
+  //    return ;
+  //}
 
   printf(
       "%s: opt_size  = %zu bytes (%.1f MB)\n", __func__,
@@ -2088,9 +2126,9 @@ struct trainer initialize_trainer() {
 
   // allocate input tensors
   struct ggml_tensor *tokens_input =
-      ggml_new_tensor_2d(ctx_input, GGML_TYPE_I32, trainer.n_tokens, n_batch);
-  struct ggml_tensor *target_probs = ggml_new_tensor_3d(
-      ctx_input, GGML_TYPE_F32, n_vocab, trainer.n_tokens, n_batch);
+      ggml_new_tensor_2d(ctx_input, GGML_TYPE_I32, n_tokens, n_batch);
+  struct ggml_tensor *target_probs =
+      ggml_new_tensor_3d(ctx_input, GGML_TYPE_F32, n_vocab, n_tokens, n_batch);
   trainer.tokens_input = tokens_input;
   trainer.target_probs = target_probs;
 
@@ -2137,7 +2175,7 @@ struct trainer initialize_trainer() {
 	    : NULL;
     loss = llama_build_lora_finetune_graphs(
 	&trainer.model, &trainer.lora, alloc, ctx_compute, gf, gb, gb_tmp,
-	&logits, tokens_input, target_probs, trainer.n_tokens, n_batch,
+	&logits, tokens_input, target_probs, n_tokens, n_batch,
 	trainer.params.common.use_flash,
 	trainer.params.common.use_checkpointing, true);
     size_t max_compute_size = ggml_gallocr_get_buffer_size(
@@ -2169,7 +2207,7 @@ struct trainer initialize_trainer() {
 	       : NULL;
   loss = llama_build_lora_finetune_graphs(
       &trainer.model, &trainer.lora, alloc, ctx_compute, gf, gb, gb_tmp,
-      &logits, tokens_input, target_probs, trainer.n_tokens, n_batch,
+      &logits, tokens_input, target_probs, n_tokens, n_batch,
       trainer.params.common.use_flash, trainer.params.common.use_checkpointing,
       false);
   trainer.loss = loss;
@@ -2178,11 +2216,11 @@ struct trainer initialize_trainer() {
 
   return trainer;
 }
-// TODO: pass by reference
+//TODO: pass by reference
 void set_train_data(struct trainer trainer, const char *fn_train_data) {
   trainer.params.common.fn_train_data = fn_train_data;
 }
-// TODO: pass by reference trainer
+//TODO: pass by reference trainer
 int trainer_execute(struct trainer trainer) {
   // tokenize data
   // TODO: train_data needs to be here too, need a load_data helper function
@@ -2197,17 +2235,11 @@ int trainer_execute(struct trainer trainer) {
 	 trainer.params.common.sample_start.c_str());
   printf("%s: include-sample-start: %s\n", __func__,
 	 trainer.params.common.include_sample_start ? "true" : "false");
-  printf("%s: overlapping-samples: %s\n", __func__,
-	 trainer.params.common.overlapping_samples ? "true" : "false");
-  // trainer.n_tokens
-  printf("%s: n_tokens: %d\n", __func__, trainer.n_tokens);
-
   tokenize_file(trainer.lctx, trainer.params.common.fn_train_data,
 		trainer.params.common.sample_start,
 		trainer.params.common.include_sample_start,
 		trainer.params.common.overlapping_samples, trainer.n_tokens,
 		train_tokens, train_samples_begin, train_samples_size);
-
   GGML_ASSERT(train_samples_begin.size() == train_samples_size.size());
 
   printf("%s: number of training tokens: %zu\n", __func__, train_tokens.size());
@@ -2346,502 +2378,515 @@ int trainer_execute(struct trainer trainer) {
 }
 
 // TODO test
-int main(int argc, char **argv) {
-  // TODO need to be able to orchestrate trainning from here:
-  //  1. one time init
-  //  2. multiple executions on multiple datasets, retaining state between
-  // each dataset
-  //  3. free and restore all resources
-//TODO: set train number to a low number, or even let lbfgs fail
-  struct trainer trainer = initialize_trainer();
-  trainer_execute(trainer);
-//TODO: this works but might leak a bit. especially considering c++
-  trainer_execute(trainer);
-  //TODO: reset trainer to run again, then inline necessary state refresh to trainer_execute()
-  // trainer_execute(trainer); //TODO do again
-  return 0;
-}
+ int main(int argc, char ** argv) {
+  struct llama_model_params llama_mparams = llama_model_default_params();
+  //llama_mparams.n_gpu_layers = trainer.params.common.n_gpu_layers;
+  llama_mparams.vocab_only = false;
+  //struct llama_model * lmodel = llama_load_model_from_file(trainer.params.fn_model_base, llama_mparams);
+  struct llama_model * lmodel = llama_load_model_from_file("finetune.gguf", llama_mparams);
+	//TODO need to be able to orchestrate trainning from here:
+	// 1. one time init
+	// 2. multiple executions on multiple datasets, retaining state between
+ //each dataset
+	// 3. free and restore all resources
+ //    struct trainer trainer = initialize_trainer();
+ //    trainer_execute(trainer);
+     return 0;
+ }
 
-// int main(int argc, char ** argv) {
+//int main(int argc, char **argv) {
+//  // TODO: can this be one function? we are going to get a lot of functions if
+//  // we dont consolidate
+//  struct train_params params = init_config();
+//
+//  // if (params.common.seed == LLAMA_DEFAULT_SEED) {
+//  //     params.common.seed = time(NULL);
+//  // }
+//  // printf("%s: seed: %u\n", __func__, params.common.seed);
+//  // srand(params.common.seed);
+//
 //  struct llama_model_params llama_mparams = llama_model_default_params();
-//  //llama_mparams.n_gpu_layers = trainer.params.common.n_gpu_layers;
+//  // the filename of the model
+//
+//  // TODO: @DEPRECATED
+//  // if (!train_params_parse(argc, argv, &params)) {
+//  //     return 1;
+//  // }
+//  // set the checkpoint in string
+//  // TODO: a folder associated with the model and dataset (start of lora-db)
+//
+//  // TODO: extract this into llama_model_default_params-like function with
+//  // llama_model loader
+//  llama_mparams.n_gpu_layers = params.common.n_gpu_layers;
 //  llama_mparams.vocab_only = false;
-//  //struct llama_model * lmodel =
-//  llama_load_model_from_file(trainer.params.fn_model_base, llama_mparams);
-//  struct llama_model * lmodel = llama_load_model_from_file("finetune.gguf",
-//  llama_mparams);
-//	//TODO need to be able to orchestrate trainning from here:
-//	// 1. one time init
-//	// 2. multiple executions on multiple datasets, retaining state between
-// //each dataset
-//	// 3. free and restore all resources
-// //    struct trainer trainer = initialize_trainer();
-// //    trainer_execute(trainer);
-//     return 0;
-// }
-////int main(int argc, char **argv) {
-////  // TODO: can this be one function? we are going to get a lot of functions
-///if /  // we dont consolidate /  struct train_params params = init_trainer_params();
-////
-////  // if (params.common.seed == LLAMA_DEFAULT_SEED) {
-////  //     params.common.seed = time(NULL);
-////  // }
-////  // printf("%s: seed: %u\n", __func__, params.common.seed);
-////  // srand(params.common.seed);
-////
-////  struct llama_model_params llama_mparams = llama_model_default_params();
-////  // the filename of the model
-////
-////  // TODO: @DEPRECATED
-////  // if (!train_params_parse(argc, argv, &params)) {
-////  //     return 1;
-////  // }
-////  // set the checkpoint in string
-////  // TODO: a folder associated with the model and dataset (start of lora-db)
-////
-////  // TODO: extract this into llama_model_default_params-like function with
-////  // llama_model loader
-////  llama_mparams.n_gpu_layers = params.common.n_gpu_layers;
-////  llama_mparams.vocab_only = false;
-////
-////  printf("%s: model base = '%s'\n", __func__, params.fn_model_base);
-////  struct llama_model *lmodel =
-////      llama_load_model_from_file(params.fn_model_base, llama_mparams);
-////
-////  struct llama_context_params llama_cparams =
-///llama_context_default_params(); /  struct llama_context *lctx = /
-///llama_new_context_with_model(lmodel, llama_cparams);
-////
-////  struct llama_model model;
-////  init_llama(lmodel, &model, params.fn_model_base, params.common.n_ctx);
-////
-////  // TODO: put this in config
-////  struct llama_lora lora;
-////
-////  struct train_state *train = init_train_state();
-////  struct ggml_opt_context *opt = train->opt;
-////
-////  opt->params.print_forward_graph = false;
-////  opt->params.print_backward_graph = false;
-////
-////  // set params from command line
-////  if (params.custom_f_norm_rms_eps) {
-////    model.hparams.f_norm_rms_eps = params.f_norm_rms_eps;
-////  }
-////  if (params.custom_rope_freq_base) {
-////    model.hparams.rope_freq_base = params.rope_freq_base;
-////  }
-////  if (params.custom_rope_freq_scale) {
-////    model.hparams.rope_freq_scale = params.rope_freq_scale;
-////  }
-////
-////  // Lora parameters
-////  // TODO: just inline these
-////  lora.hparams.lora_r = params.lora_r;
-////  lora.hparams.lora_alpha =
-////      params.custom_lora_alpha ? params.lora_alpha : params.lora_r;
-////  uint32_t n_rank_attention_norm =
-////      params.custom_n_rank_attention_norm ? params.n_rank_attention_norm :
-///1; /  uint32_t n_rank_wq = /      params.custom_n_rank_wq ? params.n_rank_wq
-///: params.lora_r; /  uint32_t n_rank_wk = /      params.custom_n_rank_wk ?
-///params.n_rank_wk : params.lora_r; /  uint32_t n_rank_wv = /
-///params.custom_n_rank_wv ? params.n_rank_wv : params.lora_r; /  uint32_t
-///n_rank_wo = /      params.custom_n_rank_wo ? params.n_rank_wo :
-///params.lora_r; /  uint32_t n_rank_ffn_norm = / params.custom_n_rank_ffn_norm
-///? params.n_rank_ffn_norm : 1; /  uint32_t n_rank_ffn_gate = /
-///params.custom_n_rank_ffn_gate ? params.n_rank_ffn_gate : params.lora_r; /
-///uint32_t n_rank_ffn_down = /      params.custom_n_rank_ffn_down ?
-///params.n_rank_ffn_down : params.lora_r; /  uint32_t n_rank_ffn_up = /
-///params.custom_n_rank_ffn_up ? params.n_rank_ffn_up : params.lora_r; /
-///uint32_t n_rank_tok_embeddings = params.custom_n_rank_tok_embeddings /
-///? params.n_rank_tok_embeddings /				       :
-///params.lora_r; /  uint32_t n_rank_norm = params.custom_n_rank_norm ?
-///params.n_rank_norm : 1; /  uint32_t n_rank_output = /
-///params.custom_n_rank_output ? params.n_rank_output : params.lora_r; /
-///lora.hparams.n_rank_attention_norm = n_rank_attention_norm; /
-///lora.hparams.n_rank_wq = n_rank_wq; /  lora.hparams.n_rank_wk = n_rank_wk; /
-///lora.hparams.n_rank_wv = n_rank_wv; /  lora.hparams.n_rank_wo = n_rank_wo; /
-///lora.hparams.n_rank_ffn_norm = n_rank_ffn_norm; /
-///lora.hparams.n_rank_ffn_gate = n_rank_ffn_gate; /
-///lora.hparams.n_rank_ffn_down = n_rank_ffn_down; /  lora.hparams.n_rank_ffn_up
-///= n_rank_ffn_up; /  lora.hparams.n_rank_tok_embeddings =
-///n_rank_tok_embeddings; /  lora.hparams.n_rank_norm = n_rank_norm; /
-///lora.hparams.n_rank_output = n_rank_output;
-////
-////  // TODO: default constructors need to be updated with initializations and
-///not /  // treated as defaults but config /  //  set opt params from command
-///line here, we are going to organize the cli /  //  mess into a neat c config
-///application. /  // lora.hparams.lora_r 		= 8;//was 4 /  //
-///opt->params = ggml_opt_default_params(GGML_OPT_TYPE_ADAM); /  opt->params =
-///ggml_opt_default_params(GGML_OPT_TYPE_LBFGS); /  opt->params.graph_size =
-///LLAMA_TRAIN_MAX_NODES; /  params.common.n_threads = 12; /
-///opt->params.n_threads = params.common.n_threads; /  // set to the number of
-///cpu cores /  // opt->params.n_threads               = 11;//TODO allocation
-///bug if called /  // from std::thread::hardware_concurrency(); /  // TODO:
-///also set epochs and batch size to 1 /  opt->params.n_gradient_accumulation =
-///0; /  train->train_epochs = 1; /  params.common.n_batch = 1; /  //
-///params.common.n_gpu_layers 		= 6; /  params.common.use_checkpointing
-///= false; /  params.common.use_flash = true; /  params.common.n_ctx = 32; /
-///model.hparams.n_ctx = 32; /  // float min_step; /  // float max_step;
-////
-////  // legacy hyperparameters
-////  opt->params.past = params.common.opt_past;
-////  opt->params.delta = params.common.opt_delta;
-////  opt->params.max_no_improvement = params.common.opt_max_no_improvement;
-////
-////  /*int m; // number of corrections to approximate the inv. Hessian
-////  int n_iter;
-////  int max_linesearch;
-////
-////  float eps;      // convergence tolerance
-////  float ftol;     // line search tolerance
-////  float wolfe;
-////  float min_step;
-////  float max_step;
-////  */
-////  opt->params.lbfgs.m = 11;
-////  // opt->params.lbfgs.n_iter = 1000000;
-////  // opt->params.lbfgs.max_linesearch = 500000;
-////  opt->params.lbfgs.linesearch = GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
-////
-////  // TODO: remove this for lbfgs
-////  //
-////  // opt->params.type		    = LLM_KV_OPTIMIZER_TYPE_LBFGS;
-////  /*
-////  opt->params.adam.n_iter             = params.common.adam_n_iter;
-////  opt->params.adam.sched              = 1.0f;
-////  opt->params.adam.alpha              = params.common.adam_alpha;
-////  opt->params.adam.decay              = params.common.adam_decay;
-////  opt->params.adam.decay_min_ndim     = params.common.adam_decay_min_ndim;
-////  opt->params.adam.beta1              = params.common.adam_beta1;
-////  opt->params.adam.beta2              = params.common.adam_beta2;
-////  opt->params.adam.gclip              = params.common.adam_gclip;
-////  opt->params.adam.eps_f              = params.common.adam_eps_f;
-////  */
-////
-////  printf("%s: init model\n", __func__);
-////  bool existed = load_checkpoint_lora_file(params.common.fn_checkpoint_in,
-////			 trainer);
-////					   //&model, &lora, train);
-////  printf("loaded checkpoint..\n");
-////
-////  if (existed) {
-////    // overwrite last n_ctx with user provided n_ctx
-////    if (params.common.custom_n_ctx) {
-////      model.hparams.n_ctx = params.common.n_ctx;
-////    }
-////
-////    const bool opt_param_count_changed =
-////	((lora.hparams.n_rank_attention_norm != n_rank_attention_norm) ||
-////	 (lora.hparams.n_rank_wq != n_rank_wq) ||
-////	 (lora.hparams.n_rank_wk != n_rank_wk) ||
-////	 (lora.hparams.n_rank_wv != n_rank_wv) ||
-////	 (lora.hparams.n_rank_wo != n_rank_wo) ||
-////	 (lora.hparams.n_rank_ffn_norm != n_rank_ffn_norm) ||
-////	 (lora.hparams.n_rank_ffn_gate != n_rank_ffn_gate) ||
-////	 (lora.hparams.n_rank_ffn_down != n_rank_ffn_down) ||
-////	 (lora.hparams.n_rank_ffn_up != n_rank_ffn_up) ||
-////	 (lora.hparams.n_rank_tok_embeddings != n_rank_tok_embeddings) ||
-////	 (lora.hparams.n_rank_norm != n_rank_norm) ||
-////	 (lora.hparams.n_rank_output != n_rank_output));
-////
-////    const bool opt_past_changed = opt->params.past !=
-///params.common.opt_past;
-////
-////    if (opt_param_count_changed) {
-////      print_lora_params(&lora.hparams);
-////      die("Provided rank differs from checkpoint file. To use different rank
-///" /	  "start finetune from scratch with empty input checkpoint, e.g " /
-///"--checkpoint-in ''. Aborting."); /      // need to discard previous
-///optimizer gradient statistics and opt_init /      // with new shapes / //
-///TODO /    } /    if (opt_past_changed) { /      die("Optimizer parameter
-///'--opt-past N' differs from checkpoint file. To " /	  "use different value
-///finetune from scratch with empty input " /	  "checkpoint, e.g
-///--checkpoint-in ''. Aborting"); /      // need to discard previous optimizer
-///past function value statistics and /      // opt_init with new shapes / //
-///TODO /    } /  } else {  // existed == false /    init_lora(&model, &lora);
-////    randomize_lora(&lora, params.common.seed, 0.0f, 1.0f, -1.0f, +1.0f);
-////    if (!params.only_write_lora) {
-////      ggml_opt_init(opt->ctx, opt, opt->params, get_parameter_count(&lora));
-////    }
-////  }
-////  opt->iter = train->train_its;
-////
-////  print_params(&model.hparams);
-////  print_lora_params(&lora.hparams);
-////  printf("%s: total train_iterations %llu\n", __func__,
-////	 (long long unsigned)train->train_its);
-////  printf("%s: seen train_samples     %llu\n", __func__,
-////	 (long long unsigned)train->train_samples);
-////  printf("%s: seen train_tokens      %llu\n", __func__,
-////	 (long long unsigned)train->train_tokens);
-////  printf("%s: completed train_epochs %llu\n", __func__,
-////	 (long long unsigned)train->train_epochs);
-////  printf("%s: lora_size = %zu bytes (%.1f MB)\n", __func__,
-////	 (ggml_used_mem(lora.ctx) + ggml_backend_buffer_get_size(lora.data)),
-////	 (float)(ggml_used_mem(lora.ctx) +
-////		 ggml_backend_buffer_get_size(lora.data)) /
-////	     (1024.0f * 1024.0f));
-////
-////  if (params.only_write_lora) {
-////    save_train_files_data save_data;
-////    save_data.fn_checkpoint_out = "";
-////    save_data.fn_lora_out = params.fn_lora_out;
-////    save_data.pattern_fn_it = params.common.pattern_fn_it;
-////    save_data.fn_latest = params.common.fn_latest;
-////    save_data.model = &model;
-////    save_data.lora = &lora;
-////
-////    save_train_files(&save_data, train);
-////
-////    free_train_state(train);
-////    ggml_free(lora.ctx);
-////    llama_free(lctx);
-////    llama_free_model(lmodel);
-////    return 0;
-////  }
-////
-////  printf("%s: opt_size  = %zu bytes (%.1f MB)\n", __func__,
-////	 ggml_get_mem_size(opt->ctx),
-////	 (float)ggml_get_mem_size(opt->ctx) / (1024.0f * 1024.0f));
-////  printf("%s: opt iter %d\n", __func__, opt->iter);
-////
-////  int n_tokens = model.hparams.n_ctx;
-////  int n_vocab = model.hparams.n_vocab;
-////  int n_batch = params.common.n_batch;
-////
-////  // context for input tensors without their data
-////  struct ggml_init_params ctx_input_params = {
-////      ggml_tensor_overhead() * 2,  // mem_size
-////      NULL,			   // mem_buffer
-////      true,			   // no_alloc
-////  };
-////  struct ggml_context *ctx_input = ggml_init(ctx_input_params);
-////
-////  // the input tensors
-////  struct ggml_tensor *tokens_input =
-////      ggml_new_tensor_2d(ctx_input, GGML_TYPE_I32, n_tokens, n_batch);
-////  struct ggml_tensor *target_probs =
-////      ggml_new_tensor_3d(ctx_input, GGML_TYPE_F32, n_vocab, n_tokens,
-///n_batch);
-////
-////  // allocate input tensors
-////  // measure required memory for input tensors
-////  ggml_backend_buffer_t input_data =
-///ggml_backend_alloc_ctx_tensors_from_buft( /      ctx_input,
-///ggml_backend_cpu_buffer_type()); /  size_t max_input_size =
-///ggml_backend_buffer_get_size(input_data); /  printf("%s: input_size = %zu
-///bytes (%.1f MB)\n", __func__, max_input_size, /	 (float)max_input_size
-//// (1024.0f * 1024.0f));
-////
-////  // context for compute tensors without their data
-////  const size_t estimated_compute_size_wo_data =
-////      (2 * LLAMA_TRAIN_MAX_NODES * ggml_tensor_overhead() +
-////       (params.common.use_checkpointing ? 3 : 2) *
-////	   (GGML_OBJECT_SIZE +
-////	    ggml_graph_overhead_custom(LLAMA_TRAIN_MAX_NODES, true)));
-////  struct ggml_init_params ctx_compute_params = {
-////      estimated_compute_size_wo_data,  // mem_size
-////      NULL,			       // mem_buffer
-////      true,			       // no_alloc
-////  };
-////  struct ggml_context *ctx_compute = NULL;
-////
-////  struct ggml_tensor *loss = NULL;
-////  struct ggml_tensor *logits = NULL;
-////
-////  struct ggml_cgraph *gf = NULL;
-////  struct ggml_cgraph *gb = NULL;
-////  struct ggml_cgraph *gb_tmp = NULL;
-////
-////  // measure required memory for compute tensors
-////  size_t best_compute_size = SIZE_MAX;
-////  enum ggml_cgraph_eval_order best_order = GGML_CGRAPH_EVAL_ORDER_COUNT;
-////  // find best evaluation order
-////  for (unsigned order = 0; order < (unsigned)GGML_CGRAPH_EVAL_ORDER_COUNT;
-////       ++order) {
-////    ctx_compute = ggml_init(ctx_compute_params);
-////    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-////    gf = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
-////    gf->order = (enum ggml_cgraph_eval_order)order;
-////    gb = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
-////    gb_tmp =
-////	params.common.use_checkpointing
-////	    ? ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true)
-////	    : NULL;
-////    loss = llama_build_lora_finetune_graphs(
-////	&model, &lora, alloc, ctx_compute, gf, gb, gb_tmp, &logits,
-////	tokens_input, target_probs, n_tokens, n_batch, params.common.use_flash,
-////	params.common.use_checkpointing, true);
-////    size_t max_compute_size = ggml_gallocr_get_buffer_size(
-////	alloc, 0);  // FIXME: this will still allocate the buffer
-////    if (max_compute_size < best_compute_size) {
-////      best_compute_size = max_compute_size;
-////      best_order = gf->order;
-////    }
-////    ggml_gallocr_free(alloc);
-////    ggml_free(ctx_compute);
-////  }
-////  size_t max_compute_size = best_compute_size;
-////  printf("%s: compute_size = %zu bytes (%.1f MB)\n", __func__,
-///max_compute_size, /	 (float)max_compute_size / (1024.0f * 1024.0f)); /
-///printf("%s: evaluation order = %s\n", __func__, /	 (best_order ==
-///GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT) ? "LEFT_TO_RIGHT" /	 : (best_order
-///== GGML_CGRAPH_EVAL_ORDER_RIGHT_TO_LEFT) /	     ? "RIGHT_TO_LEFT"
-////	     : "invalid");
-////
-////  // allocate compute tensors
-////  ctx_compute = ggml_init(ctx_compute_params);
-////  ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-////  gf = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
-////  gf->order = best_order;
-////  gb = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
-////  gb_tmp = params.common.use_checkpointing
-////	       ? ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true)
-////	       : NULL;
-////  loss = llama_build_lora_finetune_graphs(
-////      &model, &lora, alloc, ctx_compute, gf, gb, gb_tmp, &logits,
-///tokens_input, /      target_probs, n_tokens, n_batch,
-///params.common.use_flash, /      params.common.use_checkpointing, false);
-////
-////  // TODO STOP TRAINER REFACTOR HERE
-////
-////  std::vector<llama_token> train_tokens;
-////  std::vector<size_t> train_samples_begin;
-////  std::vector<size_t> train_samples_size;
-////  printf("%s: tokenize training data from %s\n", __func__,
-////	 params.common.fn_train_data);
-////  printf("%s: sample-start: %s\n", __func__,
-////	 params.common.sample_start.c_str());
-////  printf("%s: include-sample-start: %s\n", __func__,
-////	 params.common.include_sample_start ? "true" : "false");
-////  tokenize_file(lctx, params.common.fn_train_data,
-///params.common.sample_start, /
-///params.common.include_sample_start,
-////		params.common.overlapping_samples, n_tokens, train_tokens,
-////		train_samples_begin, train_samples_size);
-////  GGML_ASSERT(train_samples_begin.size() == train_samples_size.size());
-////
-////  printf("%s: number of training tokens: %zu\n", __func__,
-///train_tokens.size());
-////
-////  std::vector<size_t> token_noccurs;
-////  token_noccurs.resize(model.hparams.n_vocab, 0);
-////  for (unsigned int i = 0; i < train_tokens.size(); ++i) {
-////    ++token_noccurs[train_tokens[i]];
-////  }
-////  int n_unique_tokens = 0;
-////  for (unsigned int i = 0; i < token_noccurs.size(); ++i) {
-////    if (token_noccurs[i] == 0) continue;
-////    ++n_unique_tokens;
-////  }
-////  printf("%s: number of unique tokens: %d\n", __func__, n_unique_tokens);
-////
-////  size_t shuffle_samples_hash = compute_samples_hash(
-////      params.common.fn_train_data, train_samples_begin.data(),
-////      train_samples_size.data(), train_samples_size.size());
-////  const bool changed_train_data =
-////      (shuffle_samples_hash != train->shuffle_samples_hash) ||
-////      (train->shuffle_sample_count != train_samples_size.size());
-////  if (changed_train_data) {
-////    printf("%s: train data seems to have changed. restarting shuffled
-///epoch.\n", /	   __func__); /  } /  if (params.common.force_reshuffle) { /
-///printf( /	"%s: forced reshuffling of data. restarting with newly shuffled
-///" /	"epoch.\n", /	__func__); /  } /  if ((train->shuffle_rng_state_current
-///== "") || changed_train_data || /      params.common.force_reshuffle) { /
-///train->shuffle_rng_state_current = /
-///mt19937_seed_to_state(params.common.seed); /    train->shuffle_sample_count =
-///train_samples_size.size(); /    train->shuffle_next_sample = 0; /
-///train->shuffle_samples_hash = shuffle_samples_hash; /  } /
-///std::vector<size_t> train_shuffled_samples_offs; /  std::vector<size_t>
-///train_shuffled_samples_begin; /  std::vector<size_t>
-///train_shuffled_samples_size; /
-///train_shuffled_samples_offs.resize(train_samples_begin.size()); /
-///train_shuffled_samples_begin.resize(train_samples_begin.size()); /
-///train_shuffled_samples_size.resize(train_samples_size.size()); /
-///train->shuffle_rng_state_next = shuffle_samples( /
-///train->shuffle_rng_state_current, train_shuffled_samples_offs.data(), /
-///train_shuffled_samples_begin.data(), train_shuffled_samples_size.data(), /
-///train_samples_begin.data(), train_samples_size.data(), /
-///train_samples_size.size());
-////
-////  printf("%s: begin training\n", __func__);
-////
-////  save_train_files_data save_data;
-////  save_data.fn_checkpoint_out = params.common.fn_checkpoint_out;
-////  save_data.fn_lora_out = params.fn_lora_out;
-////  save_data.pattern_fn_it = params.common.pattern_fn_it;
-////  save_data.fn_latest = params.common.fn_latest;
-////  save_data.model = &model;
-////  save_data.lora = &lora;
-////
-////  struct train_opt_callback_data opt_cb_data;
-////  opt_cb_data.params = &params.common;
-////  opt_cb_data.train = train;
-////  opt_cb_data.save_cb = &save_train_files;
-////  opt_cb_data.save_data = &save_data;
-////  opt_cb_data.lctx = lctx;
-////  opt_cb_data.last_save_iter = opt->iter;
-////  opt_cb_data.tokens_data = train_tokens.data();
-////  opt_cb_data.tokens_size = train_tokens.size();
-////  opt_cb_data.samples_begin = train_samples_begin.data();
-////  opt_cb_data.samples_size = train_samples_size.data();
-////  opt_cb_data.shuffled_samples_offs = train_shuffled_samples_offs.data();
-////  opt_cb_data.shuffled_samples_begin = train_shuffled_samples_begin.data();
-////  opt_cb_data.shuffled_samples_size = train_shuffled_samples_size.data();
-////  opt_cb_data.samples_count = train_samples_size.size();
-////  opt_cb_data.tokens_input = tokens_input;
-////  opt_cb_data.target_probs = target_probs;
-////  opt_cb_data.first_iter = opt->iter;
-////  opt_cb_data.first_epoch = train->train_epochs;
-////  opt_cb_data.iter_at_last_epoch = -1;
-////  opt_cb_data.last_time = ggml_time_ms();
-////  opt_cb_data.millis_per_iter = 0.0;
-////
-////  // measure required memory for work buffer
-////  size_t max_work_size =
-////      ggml_graph_plan(gb, params.common.n_threads).work_size +
-///GGML_OBJECT_SIZE; /  printf("%s: work_size = %zu bytes (%.1f MB)\n",
-///__func__, max_work_size, /	 (float)max_work_size / (1024.0f * 1024.0f));
-////
-////  // context for work buffer
-////  struct ggml_init_params ctx_work_params = {
-////      max_work_size,  // mem_size
-////      NULL,	      // mem_buffer
-////      false,	      // no_alloc
-////  };
-////  struct ggml_context *ctx_work = ggml_init(ctx_work_params);
-////  printf("ggml initialized..\n");
-////
-////  int64_t t0 = ggml_time_ms();
-////
-////  ggml_opt_resume_g(ctx_work, opt, loss, gf, gb, &train_opt_callback,
-////		    (void *)&opt_cb_data);
-////
-////  ggml_free(ctx_work);
-////  ggml_free(ctx_compute);
-////  ggml_free(ctx_input);
-////  ggml_gallocr_free(alloc);
-////
-////  int64_t t1 = ggml_time_ms();
-////  printf("%s: total training time: ", __func__);
-////  print_duration((double)(t1 - t0));
-////  printf("\n");
-////
-////  int new_iters = opt->iter - opt_cb_data.last_save_iter;
-////  if (new_iters > 0) {
-////    train->train_its += new_iters;
-////    train->train_tokens +=
-////	new_iters * opt->params.n_gradient_accumulation * n_batch * n_tokens;
-////
-////    save_train_files(&save_data, train);
-////    opt_cb_data.last_save_iter = opt->iter;
-////  }
-////
-////  ggml_free(opt->ctx);
-////  free_train_state(train);
-////  ggml_free(lora.ctx);
-////  llama_free(lctx);
-////  llama_free_model(lmodel);
-////  return 0;
-////}
+//
+//  printf("%s: model base = '%s'\n", __func__, params.fn_model_base);
+//  struct llama_model *lmodel =
+//      llama_load_model_from_file(params.fn_model_base, llama_mparams);
+//
+//  struct llama_context_params llama_cparams = llama_context_default_params();
+//  struct llama_context *lctx =
+//      llama_new_context_with_model(lmodel, llama_cparams);
+//
+//  struct llama_model model;
+//  init_llama(lmodel, &model, params.fn_model_base, params.common.n_ctx);
+//
+//  // TODO: put this in config
+//  struct llama_lora lora;
+//
+//  struct train_state *train = init_train_state();
+//  struct ggml_opt_context *opt = train->opt;
+//
+//  opt->params.print_forward_graph = false;
+//  opt->params.print_backward_graph = false;
+//
+//  // set params from command line
+//  if (params.custom_f_norm_rms_eps) {
+//    model.hparams.f_norm_rms_eps = params.f_norm_rms_eps;
+//  }
+//  if (params.custom_rope_freq_base) {
+//    model.hparams.rope_freq_base = params.rope_freq_base;
+//  }
+//  if (params.custom_rope_freq_scale) {
+//    model.hparams.rope_freq_scale = params.rope_freq_scale;
+//  }
+//
+//  // Lora parameters
+//  // TODO: just inline these
+//  lora.hparams.lora_r = params.lora_r;
+//  lora.hparams.lora_alpha =
+//      params.custom_lora_alpha ? params.lora_alpha : params.lora_r;
+//  uint32_t n_rank_attention_norm =
+//      params.custom_n_rank_attention_norm ? params.n_rank_attention_norm : 1;
+//  uint32_t n_rank_wq =
+//      params.custom_n_rank_wq ? params.n_rank_wq : params.lora_r;
+//  uint32_t n_rank_wk =
+//      params.custom_n_rank_wk ? params.n_rank_wk : params.lora_r;
+//  uint32_t n_rank_wv =
+//      params.custom_n_rank_wv ? params.n_rank_wv : params.lora_r;
+//  uint32_t n_rank_wo =
+//      params.custom_n_rank_wo ? params.n_rank_wo : params.lora_r;
+//  uint32_t n_rank_ffn_norm =
+//      params.custom_n_rank_ffn_norm ? params.n_rank_ffn_norm : 1;
+//  uint32_t n_rank_ffn_gate =
+//      params.custom_n_rank_ffn_gate ? params.n_rank_ffn_gate : params.lora_r;
+//  uint32_t n_rank_ffn_down =
+//      params.custom_n_rank_ffn_down ? params.n_rank_ffn_down : params.lora_r;
+//  uint32_t n_rank_ffn_up =
+//      params.custom_n_rank_ffn_up ? params.n_rank_ffn_up : params.lora_r;
+//  uint32_t n_rank_tok_embeddings = params.custom_n_rank_tok_embeddings
+//				       ? params.n_rank_tok_embeddings
+//				       : params.lora_r;
+//  uint32_t n_rank_norm = params.custom_n_rank_norm ? params.n_rank_norm : 1;
+//  uint32_t n_rank_output =
+//      params.custom_n_rank_output ? params.n_rank_output : params.lora_r;
+//  lora.hparams.n_rank_attention_norm = n_rank_attention_norm;
+//  lora.hparams.n_rank_wq = n_rank_wq;
+//  lora.hparams.n_rank_wk = n_rank_wk;
+//  lora.hparams.n_rank_wv = n_rank_wv;
+//  lora.hparams.n_rank_wo = n_rank_wo;
+//  lora.hparams.n_rank_ffn_norm = n_rank_ffn_norm;
+//  lora.hparams.n_rank_ffn_gate = n_rank_ffn_gate;
+//  lora.hparams.n_rank_ffn_down = n_rank_ffn_down;
+//  lora.hparams.n_rank_ffn_up = n_rank_ffn_up;
+//  lora.hparams.n_rank_tok_embeddings = n_rank_tok_embeddings;
+//  lora.hparams.n_rank_norm = n_rank_norm;
+//  lora.hparams.n_rank_output = n_rank_output;
+//
+//  // TODO: default constructors need to be updated with initializations and not
+//  // treated as defaults but config
+//  //  set opt params from command line here, we are going to organize the cli
+//  //  mess into a neat c config application.
+//  // lora.hparams.lora_r 		= 8;//was 4
+//  // opt->params = ggml_opt_default_params(GGML_OPT_TYPE_ADAM);
+//  opt->params = ggml_opt_default_params(GGML_OPT_TYPE_LBFGS);
+//  opt->params.graph_size = LLAMA_TRAIN_MAX_NODES;
+//  params.common.n_threads = 12;
+//  opt->params.n_threads = params.common.n_threads;
+//  // set to the number of cpu cores
+//  // opt->params.n_threads               = 11;//TODO allocation bug if called
+//  // from std::thread::hardware_concurrency();
+//  // TODO: also set epochs and batch size to 1
+//  opt->params.n_gradient_accumulation = 0;
+//  train->train_epochs = 1;
+//  params.common.n_batch = 1;
+//  // params.common.n_gpu_layers 		= 6;
+//  params.common.use_checkpointing = false;
+//  params.common.use_flash = true;
+//  params.common.n_ctx = 32;
+//  model.hparams.n_ctx = 32;
+//  // float min_step;
+//  // float max_step;
+//
+//  // legacy hyperparameters
+//  opt->params.past = params.common.opt_past;
+//  opt->params.delta = params.common.opt_delta;
+//  opt->params.max_no_improvement = params.common.opt_max_no_improvement;
+//
+//  /*int m; // number of corrections to approximate the inv. Hessian
+//  int n_iter;
+//  int max_linesearch;
+//
+//  float eps;      // convergence tolerance
+//  float ftol;     // line search tolerance
+//  float wolfe;
+//  float min_step;
+//  float max_step;
+//  */
+//  opt->params.lbfgs.m = 11;
+//  // opt->params.lbfgs.n_iter = 1000000;
+//  // opt->params.lbfgs.max_linesearch = 500000;
+//  opt->params.lbfgs.linesearch = GGML_LINESEARCH_BACKTRACKING_STRONG_WOLFE;
+//
+//  // TODO: remove this for lbfgs
+//  //
+//  // opt->params.type		    = LLM_KV_OPTIMIZER_TYPE_LBFGS;
+//  /*
+//  opt->params.adam.n_iter             = params.common.adam_n_iter;
+//  opt->params.adam.sched              = 1.0f;
+//  opt->params.adam.alpha              = params.common.adam_alpha;
+//  opt->params.adam.decay              = params.common.adam_decay;
+//  opt->params.adam.decay_min_ndim     = params.common.adam_decay_min_ndim;
+//  opt->params.adam.beta1              = params.common.adam_beta1;
+//  opt->params.adam.beta2              = params.common.adam_beta2;
+//  opt->params.adam.gclip              = params.common.adam_gclip;
+//  opt->params.adam.eps_f              = params.common.adam_eps_f;
+//  */
+//
+//  printf("%s: init model\n", __func__);
+//  bool existed = load_checkpoint_lora_file(params.common.fn_checkpoint_in,
+//			 trainer);
+//					   //&model, &lora, train);
+//  printf("loaded checkpoint..\n");
+//
+//  if (existed) {
+//    // overwrite last n_ctx with user provided n_ctx
+//    if (params.common.custom_n_ctx) {
+//      model.hparams.n_ctx = params.common.n_ctx;
+//    }
+//
+//    const bool opt_param_count_changed =
+//	((lora.hparams.n_rank_attention_norm != n_rank_attention_norm) ||
+//	 (lora.hparams.n_rank_wq != n_rank_wq) ||
+//	 (lora.hparams.n_rank_wk != n_rank_wk) ||
+//	 (lora.hparams.n_rank_wv != n_rank_wv) ||
+//	 (lora.hparams.n_rank_wo != n_rank_wo) ||
+//	 (lora.hparams.n_rank_ffn_norm != n_rank_ffn_norm) ||
+//	 (lora.hparams.n_rank_ffn_gate != n_rank_ffn_gate) ||
+//	 (lora.hparams.n_rank_ffn_down != n_rank_ffn_down) ||
+//	 (lora.hparams.n_rank_ffn_up != n_rank_ffn_up) ||
+//	 (lora.hparams.n_rank_tok_embeddings != n_rank_tok_embeddings) ||
+//	 (lora.hparams.n_rank_norm != n_rank_norm) ||
+//	 (lora.hparams.n_rank_output != n_rank_output));
+//
+//    const bool opt_past_changed = opt->params.past != params.common.opt_past;
+//
+//    if (opt_param_count_changed) {
+//      print_lora_params(&lora.hparams);
+//      die("Provided rank differs from checkpoint file. To use different rank "
+//	  "start finetune from scratch with empty input checkpoint, e.g "
+//	  "--checkpoint-in ''. Aborting.");
+//      // need to discard previous optimizer gradient statistics and opt_init
+//      // with new shapes
+//      // TODO
+//    }
+//    if (opt_past_changed) {
+//      die("Optimizer parameter '--opt-past N' differs from checkpoint file. To "
+//	  "use different value finetune from scratch with empty input "
+//	  "checkpoint, e.g --checkpoint-in ''. Aborting");
+//      // need to discard previous optimizer past function value statistics and
+//      // opt_init with new shapes
+//      // TODO
+//    }
+//  } else {  // existed == false
+//    init_lora(&model, &lora);
+//    randomize_lora(&lora, params.common.seed, 0.0f, 1.0f, -1.0f, +1.0f);
+//    if (!params.only_write_lora) {
+//      ggml_opt_init(opt->ctx, opt, opt->params, get_parameter_count(&lora));
+//    }
+//  }
+//  opt->iter = train->train_its;
+//
+//  print_params(&model.hparams);
+//  print_lora_params(&lora.hparams);
+//  printf("%s: total train_iterations %llu\n", __func__,
+//	 (long long unsigned)train->train_its);
+//  printf("%s: seen train_samples     %llu\n", __func__,
+//	 (long long unsigned)train->train_samples);
+//  printf("%s: seen train_tokens      %llu\n", __func__,
+//	 (long long unsigned)train->train_tokens);
+//  printf("%s: completed train_epochs %llu\n", __func__,
+//	 (long long unsigned)train->train_epochs);
+//  printf("%s: lora_size = %zu bytes (%.1f MB)\n", __func__,
+//	 (ggml_used_mem(lora.ctx) + ggml_backend_buffer_get_size(lora.data)),
+//	 (float)(ggml_used_mem(lora.ctx) +
+//		 ggml_backend_buffer_get_size(lora.data)) /
+//	     (1024.0f * 1024.0f));
+//
+//  if (params.only_write_lora) {
+//    save_train_files_data save_data;
+//    save_data.fn_checkpoint_out = "";
+//    save_data.fn_lora_out = params.fn_lora_out;
+//    save_data.pattern_fn_it = params.common.pattern_fn_it;
+//    save_data.fn_latest = params.common.fn_latest;
+//    save_data.model = &model;
+//    save_data.lora = &lora;
+//
+//    save_train_files(&save_data, train);
+//
+//    free_train_state(train);
+//    ggml_free(lora.ctx);
+//    llama_free(lctx);
+//    llama_free_model(lmodel);
+//    return 0;
+//  }
+//
+//  printf("%s: opt_size  = %zu bytes (%.1f MB)\n", __func__,
+//	 ggml_get_mem_size(opt->ctx),
+//	 (float)ggml_get_mem_size(opt->ctx) / (1024.0f * 1024.0f));
+//  printf("%s: opt iter %d\n", __func__, opt->iter);
+//
+//  int n_tokens = model.hparams.n_ctx;
+//  int n_vocab = model.hparams.n_vocab;
+//  int n_batch = params.common.n_batch;
+//
+//  // context for input tensors without their data
+//  struct ggml_init_params ctx_input_params = {
+//      ggml_tensor_overhead() * 2,  // mem_size
+//      NULL,			   // mem_buffer
+//      true,			   // no_alloc
+//  };
+//  struct ggml_context *ctx_input = ggml_init(ctx_input_params);
+//
+//  // the input tensors
+//  struct ggml_tensor *tokens_input =
+//      ggml_new_tensor_2d(ctx_input, GGML_TYPE_I32, n_tokens, n_batch);
+//  struct ggml_tensor *target_probs =
+//      ggml_new_tensor_3d(ctx_input, GGML_TYPE_F32, n_vocab, n_tokens, n_batch);
+//
+//  // allocate input tensors
+//  // measure required memory for input tensors
+//  ggml_backend_buffer_t input_data = ggml_backend_alloc_ctx_tensors_from_buft(
+//      ctx_input, ggml_backend_cpu_buffer_type());
+//  size_t max_input_size = ggml_backend_buffer_get_size(input_data);
+//  printf("%s: input_size = %zu bytes (%.1f MB)\n", __func__, max_input_size,
+//	 (float)max_input_size / (1024.0f * 1024.0f));
+//
+//  // context for compute tensors without their data
+//  const size_t estimated_compute_size_wo_data =
+//      (2 * LLAMA_TRAIN_MAX_NODES * ggml_tensor_overhead() +
+//       (params.common.use_checkpointing ? 3 : 2) *
+//	   (GGML_OBJECT_SIZE +
+//	    ggml_graph_overhead_custom(LLAMA_TRAIN_MAX_NODES, true)));
+//  struct ggml_init_params ctx_compute_params = {
+//      estimated_compute_size_wo_data,  // mem_size
+//      NULL,			       // mem_buffer
+//      true,			       // no_alloc
+//  };
+//  struct ggml_context *ctx_compute = NULL;
+//
+//  struct ggml_tensor *loss = NULL;
+//  struct ggml_tensor *logits = NULL;
+//
+//  struct ggml_cgraph *gf = NULL;
+//  struct ggml_cgraph *gb = NULL;
+//  struct ggml_cgraph *gb_tmp = NULL;
+//
+//  // measure required memory for compute tensors
+//  size_t best_compute_size = SIZE_MAX;
+//  enum ggml_cgraph_eval_order best_order = GGML_CGRAPH_EVAL_ORDER_COUNT;
+//  // find best evaluation order
+//  for (unsigned order = 0; order < (unsigned)GGML_CGRAPH_EVAL_ORDER_COUNT;
+//       ++order) {
+//    ctx_compute = ggml_init(ctx_compute_params);
+//    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+//    gf = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
+//    gf->order = (enum ggml_cgraph_eval_order)order;
+//    gb = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
+//    gb_tmp =
+//	params.common.use_checkpointing
+//	    ? ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true)
+//	    : NULL;
+//    loss = llama_build_lora_finetune_graphs(
+//	&model, &lora, alloc, ctx_compute, gf, gb, gb_tmp, &logits,
+//	tokens_input, target_probs, n_tokens, n_batch, params.common.use_flash,
+//	params.common.use_checkpointing, true);
+//    size_t max_compute_size = ggml_gallocr_get_buffer_size(
+//	alloc, 0);  // FIXME: this will still allocate the buffer
+//    if (max_compute_size < best_compute_size) {
+//      best_compute_size = max_compute_size;
+//      best_order = gf->order;
+//    }
+//    ggml_gallocr_free(alloc);
+//    ggml_free(ctx_compute);
+//  }
+//  size_t max_compute_size = best_compute_size;
+//  printf("%s: compute_size = %zu bytes (%.1f MB)\n", __func__, max_compute_size,
+//	 (float)max_compute_size / (1024.0f * 1024.0f));
+//  printf("%s: evaluation order = %s\n", __func__,
+//	 (best_order == GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT) ? "LEFT_TO_RIGHT"
+//	 : (best_order == GGML_CGRAPH_EVAL_ORDER_RIGHT_TO_LEFT)
+//	     ? "RIGHT_TO_LEFT"
+//	     : "invalid");
+//
+//  // allocate compute tensors
+//  ctx_compute = ggml_init(ctx_compute_params);
+//  ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+//  gf = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
+//  gf->order = best_order;
+//  gb = ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true);
+//  gb_tmp = params.common.use_checkpointing
+//	       ? ggml_new_graph_custom(ctx_compute, LLAMA_TRAIN_MAX_NODES, true)
+//	       : NULL;
+//  loss = llama_build_lora_finetune_graphs(
+//      &model, &lora, alloc, ctx_compute, gf, gb, gb_tmp, &logits, tokens_input,
+//      target_probs, n_tokens, n_batch, params.common.use_flash,
+//      params.common.use_checkpointing, false);
+//
+//  // TODO STOP TRAINER REFACTOR HERE
+//
+//  std::vector<llama_token> train_tokens;
+//  std::vector<size_t> train_samples_begin;
+//  std::vector<size_t> train_samples_size;
+//  printf("%s: tokenize training data from %s\n", __func__,
+//	 params.common.fn_train_data);
+//  printf("%s: sample-start: %s\n", __func__,
+//	 params.common.sample_start.c_str());
+//  printf("%s: include-sample-start: %s\n", __func__,
+//	 params.common.include_sample_start ? "true" : "false");
+//  tokenize_file(lctx, params.common.fn_train_data, params.common.sample_start,
+//		params.common.include_sample_start,
+//		params.common.overlapping_samples, n_tokens, train_tokens,
+//		train_samples_begin, train_samples_size);
+//  GGML_ASSERT(train_samples_begin.size() == train_samples_size.size());
+//
+//  printf("%s: number of training tokens: %zu\n", __func__, train_tokens.size());
+//
+//  std::vector<size_t> token_noccurs;
+//  token_noccurs.resize(model.hparams.n_vocab, 0);
+//  for (unsigned int i = 0; i < train_tokens.size(); ++i) {
+//    ++token_noccurs[train_tokens[i]];
+//  }
+//  int n_unique_tokens = 0;
+//  for (unsigned int i = 0; i < token_noccurs.size(); ++i) {
+//    if (token_noccurs[i] == 0) continue;
+//    ++n_unique_tokens;
+//  }
+//  printf("%s: number of unique tokens: %d\n", __func__, n_unique_tokens);
+//
+//  size_t shuffle_samples_hash = compute_samples_hash(
+//      params.common.fn_train_data, train_samples_begin.data(),
+//      train_samples_size.data(), train_samples_size.size());
+//  const bool changed_train_data =
+//      (shuffle_samples_hash != train->shuffle_samples_hash) ||
+//      (train->shuffle_sample_count != train_samples_size.size());
+//  if (changed_train_data) {
+//    printf("%s: train data seems to have changed. restarting shuffled epoch.\n",
+//	   __func__);
+//  }
+//  if (params.common.force_reshuffle) {
+//    printf(
+//	"%s: forced reshuffling of data. restarting with newly shuffled "
+//	"epoch.\n",
+//	__func__);
+//  }
+//  if ((train->shuffle_rng_state_current == "") || changed_train_data ||
+//      params.common.force_reshuffle) {
+//    train->shuffle_rng_state_current =
+//	mt19937_seed_to_state(params.common.seed);
+//    train->shuffle_sample_count = train_samples_size.size();
+//    train->shuffle_next_sample = 0;
+//    train->shuffle_samples_hash = shuffle_samples_hash;
+//  }
+//  std::vector<size_t> train_shuffled_samples_offs;
+//  std::vector<size_t> train_shuffled_samples_begin;
+//  std::vector<size_t> train_shuffled_samples_size;
+//  train_shuffled_samples_offs.resize(train_samples_begin.size());
+//  train_shuffled_samples_begin.resize(train_samples_begin.size());
+//  train_shuffled_samples_size.resize(train_samples_size.size());
+//  train->shuffle_rng_state_next = shuffle_samples(
+//      train->shuffle_rng_state_current, train_shuffled_samples_offs.data(),
+//      train_shuffled_samples_begin.data(), train_shuffled_samples_size.data(),
+//      train_samples_begin.data(), train_samples_size.data(),
+//      train_samples_size.size());
+//
+//  printf("%s: begin training\n", __func__);
+//
+//  save_train_files_data save_data;
+//  save_data.fn_checkpoint_out = params.common.fn_checkpoint_out;
+//  save_data.fn_lora_out = params.fn_lora_out;
+//  save_data.pattern_fn_it = params.common.pattern_fn_it;
+//  save_data.fn_latest = params.common.fn_latest;
+//  save_data.model = &model;
+//  save_data.lora = &lora;
+//
+//  struct train_opt_callback_data opt_cb_data;
+//  opt_cb_data.params = &params.common;
+//  opt_cb_data.train = train;
+//  opt_cb_data.save_cb = &save_train_files;
+//  opt_cb_data.save_data = &save_data;
+//  opt_cb_data.lctx = lctx;
+//  opt_cb_data.last_save_iter = opt->iter;
+//  opt_cb_data.tokens_data = train_tokens.data();
+//  opt_cb_data.tokens_size = train_tokens.size();
+//  opt_cb_data.samples_begin = train_samples_begin.data();
+//  opt_cb_data.samples_size = train_samples_size.data();
+//  opt_cb_data.shuffled_samples_offs = train_shuffled_samples_offs.data();
+//  opt_cb_data.shuffled_samples_begin = train_shuffled_samples_begin.data();
+//  opt_cb_data.shuffled_samples_size = train_shuffled_samples_size.data();
+//  opt_cb_data.samples_count = train_samples_size.size();
+//  opt_cb_data.tokens_input = tokens_input;
+//  opt_cb_data.target_probs = target_probs;
+//  opt_cb_data.first_iter = opt->iter;
+//  opt_cb_data.first_epoch = train->train_epochs;
+//  opt_cb_data.iter_at_last_epoch = -1;
+//  opt_cb_data.last_time = ggml_time_ms();
+//  opt_cb_data.millis_per_iter = 0.0;
+//
+//  // measure required memory for work buffer
+//  size_t max_work_size =
+//      ggml_graph_plan(gb, params.common.n_threads).work_size + GGML_OBJECT_SIZE;
+//  printf("%s: work_size = %zu bytes (%.1f MB)\n", __func__, max_work_size,
+//	 (float)max_work_size / (1024.0f * 1024.0f));
+//
+//  // context for work buffer
+//  struct ggml_init_params ctx_work_params = {
+//      max_work_size,  // mem_size
+//      NULL,	      // mem_buffer
+//      false,	      // no_alloc
+//  };
+//  struct ggml_context *ctx_work = ggml_init(ctx_work_params);
+//  printf("ggml initialized..\n");
+//
+//  int64_t t0 = ggml_time_ms();
+//
+//  ggml_opt_resume_g(ctx_work, opt, loss, gf, gb, &train_opt_callback,
+//		    (void *)&opt_cb_data);
+//
+//  ggml_free(ctx_work);
+//  ggml_free(ctx_compute);
+//  ggml_free(ctx_input);
+//  ggml_gallocr_free(alloc);
+//
+//  int64_t t1 = ggml_time_ms();
+//  printf("%s: total training time: ", __func__);
+//  print_duration((double)(t1 - t0));
+//  printf("\n");
+//
+//  int new_iters = opt->iter - opt_cb_data.last_save_iter;
+//  if (new_iters > 0) {
+//    train->train_its += new_iters;
+//    train->train_tokens +=
+//	new_iters * opt->params.n_gradient_accumulation * n_batch * n_tokens;
+//
+//    save_train_files(&save_data, train);
+//    opt_cb_data.last_save_iter = opt->iter;
+//  }
+//
+//  ggml_free(opt->ctx);
+//  free_train_state(train);
+//  ggml_free(lora.ctx);
+//  llama_free(lctx);
+//  llama_free_model(lmodel);
+//  return 0;
+//}

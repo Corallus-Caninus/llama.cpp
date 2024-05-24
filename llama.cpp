@@ -102,7 +102,7 @@
 #endif
 #else
 #define LLAMA_ATTRIBUTE_FORMAT(...)
-#endif
+#endif/a
 
 #define LLAMA_MAX_NODES   8192
 #define LLAMA_MAX_EXPERTS 60

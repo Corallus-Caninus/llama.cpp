@@ -1207,6 +1207,35 @@ if (BUILD_SHARED_LIBS)
     target_compile_definitions(llama PRIVATE LLAMA_SHARED LLAMA_BUILD)
     if (LLAMA_METAL)
         set_target_properties(llama PROPERTIES RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ggml-metal.metal")
+        set_target_properties(llama PROPERTIES RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ggml-metal.metal")
+    endif()
+endif()
+
+# trainer
+
+add_library(trainer
+            trainer.cpp
+#common/common.h
+#            unicode.h
+#            unicode.cpp
+#            unicode-data.cpp
+            )
+
+target_include_directories(trainer PUBLIC .)
+target_compile_features   (trainer PUBLIC cxx_std_11) # don't bump
+
+target_link_libraries(trainer PRIVATE
+    ggml
+    llama
+    ${LLAMA_EXTRA_LIBS}
+    )
+
+if (BUILD_SHARED_LIBS)
+    set_target_properties(trainer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+#    target_compile_definitions(trainer PRIVATE LLAMA_SHARED LLAMA_BUILD)
+    target_compile_definitions(trainer PRIVATE )
+    if (LLAMA_METAL)
+        set_target_properties(trainer PROPERTIES RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ggml-metal.metal")
     endif()
 endif()
 

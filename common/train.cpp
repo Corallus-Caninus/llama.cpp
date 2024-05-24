@@ -70,6 +70,7 @@ void free_random_uniform_distribution(struct random_uniform_distribution * rnd) 
 }
 
 struct ggml_tensor * randomize_tensor_normal(struct ggml_tensor * tensor, struct random_normal_distribution * rnd) {
+
     float scale = 1.0f; // xavier
     switch (ggml_n_dims(tensor)) {
         case 1:
